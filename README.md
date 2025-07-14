@@ -32,6 +32,18 @@ The `Yahoo Fantasy Football` folder includes two scripts:
 
 Feel free to customize these scripts to suit your league or use them as examples for your own experiments.
 
+## Citi Global Management Script
+
+The `Citi Global Management` folder contains a tool for filling in accounting information:
+
+- **Transaction Accounting Autofill** – scans completed transactions on the Citi Global Management site and lets you copy accounting codes into a new transaction with a single click.
+
+## Project Euler Script
+
+The `Project Euler` folder provides one script:
+
+- **Project Euler Difficulty Highlighter** – adds a difficulty dropdown to the progress page so you can highlight problems of a specific rating.
+
 ## License
 
 This repository is released under the MIT License. See the [LICENSE](LICENSE) file for details.
