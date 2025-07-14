@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      0.4
 // @description  Adds a difficulty filter dropdown to the Progress page and highlights problems of that difficulty.
-// @author       YourName
+// @author       Bruce J. Hart <bruce.hart@gmail.com>
 // @match        https://projecteuler.net/progress*
 // @grant        none
 // ==/UserScript==
