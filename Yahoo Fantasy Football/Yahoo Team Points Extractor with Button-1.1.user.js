@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Yahoo Team Points Extractor with Button
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/brucehart/userscripts
 // @version      1.1
 // @description  Adds a button to extract team names and projected points from Yahoo matchups tables, format them, and copy them to the clipboard upon button press.
-// @author       You
+// @author       Bruce J. Hart
 // @match        *://*.yahoo.com/*
 // @grant        GM_setClipboard
 // ==/UserScript==

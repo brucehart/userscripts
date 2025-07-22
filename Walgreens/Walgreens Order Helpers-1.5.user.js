@@ -3,6 +3,7 @@
 // @namespace    https://github.com/brucehart/userscripts
 // @version      1.5
 // @description  Copy tab‑separated receipt row and copy PDF path placeholder to clipboard.
+// @author       Bruce J. Hart
 // @match        https://www.walgreens.com/orderhistory/order/details-ui*
 // @grant        GM_setClipboard
 // @grant        GM_addStyle

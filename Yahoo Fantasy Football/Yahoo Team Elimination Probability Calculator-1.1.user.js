@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Yahoo Team Elimination Probability Calculator
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/brucehart/userscripts
 // @version      1.1
 // @description  Calculate and display the elimination probabilities for Yahoo teams based on their projected scores and a user-defined standard deviation.
+// @author       Bruce J. Hart
 // @match        https://football.fantasysports.yahoo.com/*
 // @grant        GM_setClipboard
 // ==/UserScript==
