@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Project Euler Difficulty Highlighter
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/brucehart/userscripts
 // @version      0.4
 // @description  Adds a difficulty filter dropdown to the Progress page and highlights problems of that difficulty.
-// @author       Bruce J. Hart <bruce.hart@gmail.com>
+// @author       Bruce J. Hart
 // @match        https://projecteuler.net/progress*
 // @grant        none
 // ==/UserScript==

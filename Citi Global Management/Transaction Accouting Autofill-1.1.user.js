@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Transaction Accounting Autofill
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/brucehart/userscripts
 // @version      1.1
 // @description  Adds a command window to copy accounting codes from previous transactions.
-// @author       Bruce J. Hart <bruce.hart@gmail.com>
+// @author       Bruce J. Hart
 // @match        https://www.globalmanagement.citidirect.com/sdng/fintrans/a/accountTransSummaryRender.do*
 // @grant        GM_addStyle
 // ==/UserScript==
