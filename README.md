@@ -23,26 +23,14 @@ After installation you should see the Tampermonkey icon in your browser toolbar.
 
 You can enable or disable scripts at any time through the Tampermonkey dashboard. Each script also contains inline comments describing what it does and any options you can configure.
 
-## Yahoo Fantasy Football Scripts
+## Script directories
 
-The `Yahoo Fantasy Football` folder includes two scripts:
+Scripts are grouped by site or application. Each folder contains a `README.md` with the available scripts and usage instructions.
 
-- **Yahoo Team Elimination Probability Calculator** – calculates elimination probabilities for each team and displays them on the matchups page.
-- **Yahoo Team Points Extractor with Button** – adds a button to quickly copy team names and projected points to your clipboard.
-
-Feel free to customize these scripts to suit your league or use them as examples for your own experiments.
-
-## Citi Global Management Script
-
-The `Citi Global Management` folder contains a tool for filling in accounting information:
-
-- **Transaction Accounting Autofill** – scans completed transactions on the Citi Global Management site and lets you copy accounting codes into a new transaction with a single click.
-
-## Project Euler Script
-
-The `Project Euler` folder provides one script:
-
-- **Project Euler Difficulty Highlighter** – adds a difficulty dropdown to the progress page so you can highlight problems of a specific rating.
+- `Yahoo Fantasy Football`
+- `Citi Global Management`
+- `Project Euler`
+- `Walgreens`
 
 ## License
 
