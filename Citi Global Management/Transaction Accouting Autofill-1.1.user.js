@@ -1,257 +1,164 @@
 // ==UserScript==
 // @name         Transaction Accounting Autofill
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.1
+// @version      1.2
 // @description  Adds a command window to copy accounting codes from previous transactions.
 // @author       Bruce J. Hart
 // @match        https://www.globalmanagement.citidirect.com/sdng/fintrans/a/accountTransSummaryRender.do*
 // @grant        GM_addStyle
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    // --- 1. STYLES FOR THE COMMAND WINDOW ---
-    // This function injects CSS into the page to style our floating window.
+    // ---------- 1.  STYLES ----------
     GM_addStyle(`
-        #autofill-container {
-            position: fixed;
-            top: 150px;
-            right: 20px;
-            width: 320px;
-            background-color: #f9f9f9;
-            border: 1px solid #ccc;
-            border-radius: 8px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-            z-index: 10001;
-            font-family: Arial, sans-serif;
-            font-size: 14px;
-            display: none; /* Initially hidden */
-            flex-direction: column;
-            padding: 15px;
-        }
-        #autofill-container h3 {
-            margin-top: 0;
-            margin-bottom: 15px;
-            font-size: 16px;
-            color: #333;
-            text-align: center;
-        }
-        #autofill-select {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border-radius: 4px;
-            border: 1px solid #ddd;
-        }
-        #autofill-button, #autofill-close-button {
-            padding: 10px 15px;
-            cursor: pointer;
-            border: none;
-            border-radius: 4px;
-            color: white;
-            font-size: 14px;
-        }
-        #autofill-button {
-            background-color: #4CAF50; /* Green */
-            flex-grow: 1;
-            margin-right: 10px;
-        }
-        #autofill-button:hover {
-            background-color: #45a049;
-        }
-        #autofill-close-button {
-            background-color: #f44336; /* Red */
-        }
-        #autofill-close-button:hover {
-            background-color: #da190b;
-        }
-        #toggle-autofill-window {
-            position: fixed;
-            top: 150px;
-            right: 20px;
-            z-index: 10000;
-            background-color: #007bff;
-            color: white;
-            padding: 10px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .autofill-button-container {
-            display: flex;
-            justify-content: space-between;
-        }
+        #autofill-container{position:fixed;top:150px;right:20px;width:320px;background:#f9f9f9;border:1px solid #ccc;border-radius:8px;
+            box-shadow:0 4px 8px rgba(0,0,0,.1);z-index:10001;font:14px Arial,sans-serif;display:none;flex-direction:column;padding:15px}
+        #autofill-container h3{margin:0 0 15px;font-size:16px;color:#333;text-align:center}
+        #autofill-select{width:100%;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ddd}
+        #autofill-button,#autofill-close-button{padding:10px 15px;cursor:pointer;border:none;border-radius:4px;color:#fff;font-size:14px}
+        #autofill-button{background:#4caf50;flex-grow:1;margin-right:10px}
+        #autofill-button:hover{background:#45a049}
+        #autofill-close-button{background:#f44336}
+        #autofill-close-button:hover{background:#da190b}
+        #toggle-autofill-window{position:fixed;top:150px;right:20px;z-index:10000;background:#007bff;color:#fff;
+            padding:10px 15px;border-radius:5px;cursor:pointer;box-shadow:0 2px 4px rgba(0,0,0,.1)}
+        .autofill-button-container{display:flex;justify-content:space-between}
     `);
 
-    // --- 2. CREATE AND APPEND THE UI ELEMENTS ---
-    // The main container for our tool
+    // ---------- 2.  UI ----------
     const container = document.createElement('div');
     container.id = 'autofill-container';
     container.innerHTML = `
         <h3>Accounting Autofill</h3>
-        <select id="autofill-select">
-            <option value="">-- Select a Template --</option>
-        </select>
+        <select id="autofill-select"><option value="">-- Select a Template --</option></select>
         <div class="autofill-button-container">
             <button id="autofill-button">Fill Codes</button>
             <button id="autofill-close-button">Close</button>
-        </div>
-    `;
+        </div>`;
     document.body.appendChild(container);
 
-    // The button to show/hide the tool
-    const toggleButton = document.createElement('button');
-    toggleButton.id = 'toggle-autofill-window';
-    toggleButton.textContent = 'Show Autofill';
-    document.body.appendChild(toggleButton);
+    const toggleBtn = Object.assign(document.createElement('button'), {
+        id: 'toggle-autofill-window',
+        textContent: 'Show Autofill'
+    });
+    document.body.appendChild(toggleBtn);
 
-    const autofillSelect = document.getElementById('autofill-select');
-    let transactionTemplates = [];
+    const dd = document.getElementById('autofill-select');
+    let templates = [];
 
-    // --- 3. CORE LOGIC FUNCTIONS ---
+    // ---------- 3.  HELPERS ----------
+    // Write value & mimic user typing so host page keeps it
+    function fillInput(el, val) {
+        el.focus();
+        el.value = '';                            // clear any residual
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.value = val;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.blur();
+    }
 
-    /**
-     * Finds and parses all completed transactions on the page to create templates.
-     */
+    // ---------- 4.  SCAN PAST TRANSACTIONS ----------
     function scanTransactions() {
-        console.log("Scanning for completed transactions...");
-        transactionTemplates = [];
-        const uniqueTemplates = new Set();
+        templates = [];
+        const seen = new Set();
+        const rows = document.querySelectorAll('#searchresults > tbody > tr[role="row"]');
 
-        const transactionRows = document.querySelectorAll('#searchresults > tbody > tr[role="row"]');
-
-        transactionRows.forEach((row, index) => {
-            const staticContent = row.nextElementSibling.nextElementSibling.querySelector(`#ca_static_content_${index}`);
+        rows.forEach((row, idx) => {
+            const staticContent = row.nextElementSibling?.nextElementSibling?.querySelector(`#ca_static_content_${idx}`);
             if (!staticContent) return;
 
-            // Extract the expense description
-            const descDiv = staticContent.querySelector(`#expenseDescriptionStatic_${index}`);
-            const description = descDiv ? descDiv.innerText.trim() : '';
+            const desc = staticContent.querySelector(`#expenseDescriptionStatic_${idx}`)?.innerText.trim() || '';
+            if (!desc) return; // skip incomplete records
 
-            // If there's no description, it's likely not a filled-out transaction
-            if (!description) return;
-
-            // Extract accounting codes
             const codes = {};
-            const codeHeaders = Array.from(staticContent.querySelectorAll('th[style*="word-wrap"]'));
-            const codeValues = Array.from(staticContent.querySelectorAll('tr.trCAvalues > td > div[id^="static_acctCodeValueSection_"]'));
+            const headers = staticContent.querySelectorAll('th[style*="word-wrap"]');
+            const values  = staticContent.querySelectorAll('tr.trCAvalues > td > div[id^="static_acctCodeValueSection_"]');
 
-            codeHeaders.forEach((header, i) => {
-                const key = header.innerText.trim();
-                const valueDiv = codeValues[i];
-                if (key && valueDiv) {
-                    // Get the text from the 'i' tag, which holds the actual value
-                    const valueNode = valueDiv.querySelector('i');
-                    codes[key] = valueNode ? valueNode.innerText.trim() : '';
-                }
+            headers.forEach((h, i) => {
+                const key = h.innerText.trim();
+                const val = values[i]?.querySelector('i')?.innerText.trim() || '';
+                if (key) codes[key] = val;
             });
 
-            // Create a unique key for this combination to avoid duplicates
-            const templateKey = JSON.stringify({ description, ...codes });
+            const sig = JSON.stringify({ desc, ...codes });
+            if (seen.has(sig)) return;
+            seen.add(sig);
 
-            if (!uniqueTemplates.has(templateKey)) {
-                uniqueTemplates.add(templateKey);
-                transactionTemplates.push({
-                    displayText: `Project: ${codes['Project'] || 'N/A'} | Tax: ${codes['Sales Tax Charged'] || 'N/A'}`,
-                    data: { description, codes }
-                });
-            }
+            templates.push({
+                displayText: `Project: ${codes['Project'] || 'N/A'} | Tax: ${codes['Sales Tax Charged'] || 'N/A'}`,
+                data: { desc, codes }
+            });
         });
 
-        populateDropdown();
-        console.log(`Found ${transactionTemplates.length} unique transaction templates.`);
-    }
-
-    /**
-     * Fills the dropdown with the templates found by scanTransactions.
-     */
-    function populateDropdown() {
-        autofillSelect.innerHTML = '<option value="">-- Select a Template --</option>'; // Clear existing options
-        transactionTemplates.forEach((template, index) => {
-            const option = document.createElement('option');
-            option.value = index;
-            option.textContent = template.displayText;
-            autofillSelect.appendChild(option);
+        // refresh dropdown
+        dd.innerHTML = '<option value="">-- Select a Template --</option>';
+        templates.forEach((t, i) => {
+            dd.add(new Option(t.displayText, i));
         });
     }
 
-    /**
-     * Applies the selected template to the currently open transaction for editing.
-     */
-    function applySelectedTemplate() {
-        const selectedIndex = autofillSelect.value;
-        if (selectedIndex === "") {
-            alert("Please select a template from the dropdown first.");
-            return;
-        }
+    // ---------- 5.  APPLY TEMPLATE ----------
+    function applyTemplate() {
+        const idx = dd.value;
+        if (idx === '') return alert('Pick a template first.');
 
-        // Find which transaction is currently in edit mode
-        const openEditDiv = document.querySelector('div[id^="ca_dynamic_content_"][style=""]');
-        if (!openEditDiv) {
-            alert("Please click 'Edit Accounting Codes' on a transaction before trying to fill.");
-            return;
-        }
+        const editDiv = document.querySelector('div[id^="ca_dynamic_content_"][style=""]');
+        if (!editDiv) return alert('Open “Edit Accounting Codes” on a transaction first.');
 
-        const template = transactionTemplates[selectedIndex].data;
-        console.log("Applying template:", template);
+        const tpl = templates[idx].data;
 
-        // Fill the expense description
-        const descTextarea = openEditDiv.querySelector('textarea[name^="expenseDescription"]');
-        if (descTextarea) {
-            descTextarea.value = template.description;
-        }
+        // Description textarea
+        editDiv.querySelectorAll('textarea[name^="expenseDescription"]').forEach(t => fillInput(t, tpl.desc));
 
-        // Fill the accounting codes
-        const codeHeaders = Array.from(openEditDiv.querySelectorAll('label[id^="txtAcctCode_"]'));
-
-        codeHeaders.forEach(label => {
+        // Accounting codes
+        editDiv.querySelectorAll('label[id^="txtAcctCode_"]').forEach(label => {
             const key = label.innerText.trim();
-            if (template.codes.hasOwnProperty(key)) {
-                const inputId = label.id.replace('Label', '');
-                const inputElement = document.getElementById(inputId) || document.querySelector(`input[aria-labelledby="${label.id}"]`);
+            if (!(key in tpl.codes)) return;
 
-                if (inputElement) {
-                    if (inputElement.tagName === 'SELECT') {
-                        // For dropdowns, find the option whose text matches
-                        for (let option of inputElement.options) {
-                            if (option.text === template.codes[key]) {
-                                option.selected = true;
-                                break;
-                            }
-                        }
-                    } else {
-                        // For text inputs
-                        inputElement.value = template.codes[key];
+            const raw = tpl.codes[key];                 // e.g. "1234 - Travel Canada"
+            const codeOnly = raw.split(' - ')[0].trim();// => "1234"
+
+            const inpId = label.id.replace('Label', '');
+            const el = document.getElementById(inpId) || editDiv.querySelector(`input[aria-labelledby="${label.id}"]`);
+            if (!el) return;
+
+            if (el.tagName === 'SELECT') {
+                // Prefer exact match on text, else startsWith(codeOnly)
+                Array.from(el.options).some(o => {
+                    if (o.text.trim() === raw || o.text.trim().startsWith(codeOnly)) {
+                        el.value = o.value;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
                     }
-                    // Trigger a change event so the page recognizes the update
-                    inputElement.dispatchEvent(new Event('change', { bubbles: true }));
-                }
+                    return false;
+                });
+            } else {
+                fillInput(el, codeOnly);
             }
         });
 
-        alert("Accounting codes have been filled.");
+        alert('Accounting codes filled.');
     }
 
-
-    // --- 4. EVENT LISTENERS ---
-    document.getElementById('autofill-button').addEventListener('click', applySelectedTemplate);
-
-    toggleButton.addEventListener('click', () => {
-        const container = document.getElementById('autofill-container');
-        if (container.style.display === 'none' || container.style.display === '') {
-            scanTransactions(); // Re-scan every time it's opened
+    // ---------- 6.  EVENTS ----------
+    document.getElementById('autofill-button').addEventListener('click', applyTemplate);
+    toggleBtn.addEventListener('click', () => {
+        const v = container.style.display;
+        if (!v || v === 'none') {
+            scanTransactions();
             container.style.display = 'flex';
-            toggleButton.textContent = 'Hide Autofill';
+            toggleBtn.textContent = 'Hide Autofill';
         } else {
             container.style.display = 'none';
-            toggleButton.textContent = 'Show Autofill';
+            toggleBtn.textContent = 'Show Autofill';
         }
     });
-
     document.getElementById('autofill-close-button').addEventListener('click', () => {
-        document.getElementById('autofill-container').style.display = 'none';
-        toggleButton.textContent = 'Show Autofill';
+        container.style.display = 'none';
+        toggleBtn.textContent = 'Show Autofill';
     });
-
 })();
