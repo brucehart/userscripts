@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.13
+// @version      1.14
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -19,6 +19,7 @@
   const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
   const MAX_CYCLE_PHASE = MAX_COLOR_STATE + 1; // 0=unselected,1=selected,2-5=colors
   const customStateByCardKey = new Map();
+  const pointerDownPhaseByKey = new Map(); // track phase at pointerdown time
 
   let reapplyQueued = false;
 
@@ -48,10 +49,15 @@
     }
 
     const phase = getCyclePhase(key, card);
-    // Let phase 0 run native NYT handlers (unselected -> selected).
-    // Block native handlers for phase 1 (selected -> yellow) and all
-    // custom color phases so we control the full transition.
-    if (phase >= 1) {
+
+    // Save the phase at pointerdown time so the click handler can use it
+    pointerDownPhaseByKey.set(key, phase);
+
+    // Only block native handlers for custom color phases (2+).
+    // Phase 0 (unselected) and phase 1 (selected) need native handling:
+    // - Phase 0: NYT selects the card
+    // - Phase 1: NYT deselects the card (then we apply yellow in click handler)
+    if (phase > 1) {
       event.stopImmediatePropagation();
     }
   }
@@ -71,7 +77,12 @@
       return;
     }
 
-    const currentPhase = getCyclePhase(key, card);
+    // Use the phase saved at pointerdown time, falling back to live phase
+    const savedPhase = pointerDownPhaseByKey.get(key);
+    pointerDownPhaseByKey.delete(key);
+
+    const currentPhase = savedPhase !== undefined ? savedPhase : getCyclePhase(key, card);
+
     if (currentPhase === 0) {
       // First click should be the site's native selected behavior.
       setCustomState(key, 0);
@@ -79,14 +90,10 @@
     }
 
     if (currentPhase === 1) {
-      // Native pointerdown is blocked for this phase, so programmatically
-      // deselect the tile, then apply yellow.
+      // Native pointerdown already ran and deselected the card.
+      // Prevent the click from re-selecting it and apply yellow.
       event.preventDefault();
       event.stopImmediatePropagation();
-      const input = card.querySelector('input');
-      if (input) {
-        input.click();
-      }
       setCustomState(key, 1);
       queueReapplyAfterDeselection(key);
       return;
