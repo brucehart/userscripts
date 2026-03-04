@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.14
+// @version      1.15
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -53,11 +53,11 @@
     // Save the phase at pointerdown time so the click handler can use it
     pointerDownPhaseByKey.set(key, phase);
 
-    // Only block native handlers for custom color phases (2+).
+    // Only block native handlers for custom color phases (2+) when Ctrl is not held.
     // Phase 0 (unselected) and phase 1 (selected) need native handling:
     // - Phase 0: NYT selects the card
     // - Phase 1: NYT deselects the card (then we apply yellow in click handler)
-    if (phase > 1) {
+    if (phase > 1 && !event.ctrlKey) {
       event.stopImmediatePropagation();
     }
   }
@@ -82,6 +82,25 @@
     pointerDownPhaseByKey.delete(key);
 
     const currentPhase = savedPhase !== undefined ? savedPhase : getCyclePhase(key, card);
+    const ctrlPressed = event.ctrlKey;
+
+    if (ctrlPressed) {
+      if (currentPhase === 1) {
+        // Native pointerdown already ran and deselected the card.
+        // Prevent click from re-selecting and keep custom colors cleared.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setCustomState(key, 0);
+        queueReapply();
+        return;
+      }
+
+      // For phase 0 and custom color phases, clear custom colors and let native
+      // selection logic run so Ctrl toggles selected/unselected only.
+      setCustomState(key, 0);
+      queueReapply();
+      return;
+    }
 
     if (currentPhase === 0) {
       // First click should be the site's native selected behavior.
