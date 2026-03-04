@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.1
+// @version      1.2
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -17,6 +17,7 @@
   const CYCLE_ATTR = 'data-tm-connections-cycle';
   const STATE_COUNT = 5; // 0 = none, 1-4 = yellow/green/blue/purple
   const stateByCardKey = new Map();
+  const actionVersionByCardKey = new Map();
 
   let reapplyQueued = false;
 
@@ -39,18 +40,14 @@
     if (!key) {
       return;
     }
+    const actionVersion = bumpActionVersion(key);
 
     const state = stateByCardKey.get(key) || 0;
 
     if (state > 0) {
       if (isSelectedByGame(card)) {
-        // If selected somehow, let NYT deselect it, then restore current custom state.
-        setTimeout(() => {
-          const liveCard = findCardByKey(key);
-          if (liveCard && !isDisabled(liveCard)) {
-            applyStateToCard(liveCard, state);
-          }
-        }, 0);
+        // Let NYT deselect it, then restore current custom state.
+        scheduleApplyState(key, state, actionVersion);
         return;
       }
 
@@ -65,13 +62,7 @@
 
     // First click is native select; second click on selected card becomes yellow.
     if (isSelectedByGame(card)) {
-      setTimeout(() => {
-        const liveCard = findCardByKey(key);
-        if (liveCard && !isDisabled(liveCard)) {
-          setState(key, 1);
-          applyStateToCard(liveCard, 1);
-        }
-      }, 0);
+      scheduleApplyState(key, 1, actionVersion);
     }
   }
 
@@ -116,6 +107,39 @@
     } else {
       stateByCardKey.set(key, state);
     }
+  }
+
+  function bumpActionVersion(key) {
+    const next = (actionVersionByCardKey.get(key) || 0) + 1;
+    actionVersionByCardKey.set(key, next);
+    return next;
+  }
+
+  function isCurrentActionVersion(key, version) {
+    return (actionVersionByCardKey.get(key) || 0) === version;
+  }
+
+  function scheduleApplyState(key, state, version, attempt = 0) {
+    const delayMs = attempt === 0 ? 0 : 16;
+    setTimeout(() => {
+      if (!isCurrentActionVersion(key, version)) {
+        return;
+      }
+
+      const liveCard = findCardByKey(key);
+      if (!liveCard || isDisabled(liveCard)) {
+        return;
+      }
+
+      // If React has not completed the deselect render yet, retry briefly.
+      if (isSelectedByGame(liveCard) && attempt < 3) {
+        scheduleApplyState(key, state, version, attempt + 1);
+        return;
+      }
+
+      setState(key, state);
+      applyStateToCard(liveCard, state);
+    }, delayMs);
   }
 
   function queueReapply() {
