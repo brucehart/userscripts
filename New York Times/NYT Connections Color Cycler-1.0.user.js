@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.8
-// @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
+// @version      1.9
+// @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
 // @match        https://www.nytimes.com/crosswords/game/connections*
@@ -17,8 +17,8 @@
   const CYCLE_CLASS = 'tm-nyt-connections-cycle';
   const CYCLE_ATTR = 'data-tm-connections-cycle';
   const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
+  const MAX_CYCLE_PHASE = MAX_COLOR_STATE + 1; // 0=unselected,1=selected,2-5=colors
   const customStateByCardKey = new Map();
-  const armedByCardKey = new Map(); // true after first native select click
 
   let reapplyQueued = false;
 
@@ -47,12 +47,8 @@
       return;
     }
 
-    const customState = customStateByCardKey.get(key) || 0;
-    const armed = armedByCardKey.get(key) === true;
-    if (customState > 0 || armed) {
-      // Intercept only when we are in custom mode or on second-click transition.
-      event.stopImmediatePropagation();
-    }
+    // Block NYT pointer handlers so click progression is controlled by this script.
+    event.stopImmediatePropagation();
   }
 
   function onCardClick(event) {
@@ -70,42 +66,12 @@
       return;
     }
 
-    const customState = customStateByCardKey.get(key) || 0;
-    const selected = isSelectedByGame(card);
+    event.preventDefault();
+    event.stopImmediatePropagation();
 
-    if (customState > 0) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-
-      const nextState = customState >= MAX_COLOR_STATE ? 0 : customState + 1;
-      setCustomState(key, nextState);
-      if (nextState === 0) {
-        armedByCardKey.set(key, false);
-      }
-      if (selected) {
-        setNativeSelected(key, false);
-      } else {
-        queueReapply();
-      }
-      return;
-    }
-
-    const armed = armedByCardKey.get(key) === true;
-
-    if (armed) {
-      // Second click: selected -> yellow.
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      armedByCardKey.set(key, false);
-      setCustomState(key, 1);
-      setNativeSelected(key, false);
-      return;
-    }
-
-    // First click: allow native selected state.
-    if (!selected) {
-      armedByCardKey.set(key, true);
-    }
+    const currentPhase = getCyclePhase(key, card);
+    const nextPhase = currentPhase >= MAX_CYCLE_PHASE ? 0 : currentPhase + 1;
+    applyPhase(key, card, nextPhase);
   }
 
   function getCardFromTarget(target) {
@@ -148,6 +114,50 @@
       customStateByCardKey.delete(key);
     } else {
       customStateByCardKey.set(key, state);
+    }
+  }
+
+  function getCyclePhase(key, card) {
+    if (isSelectedByGame(card)) {
+      return 1;
+    }
+
+    const customState = customStateByCardKey.get(key) || 0;
+    if (customState > 0) {
+      return customState + 1;
+    }
+
+    return 0;
+  }
+
+  function applyPhase(key, card, phase) {
+    const selected = isSelectedByGame(card);
+
+    if (phase === 0) {
+      setCustomState(key, 0);
+      if (selected) {
+        setNativeSelected(key, false);
+      } else {
+        queueReapply();
+      }
+      return;
+    }
+
+    if (phase === 1) {
+      setCustomState(key, 0);
+      if (!selected) {
+        setNativeSelected(key, true);
+      } else {
+        queueReapply();
+      }
+      return;
+    }
+
+    setCustomState(key, phase - 1);
+    if (selected) {
+      setNativeSelected(key, false);
+    } else {
+      queueReapply();
     }
   }
 
@@ -217,12 +227,6 @@
     for (const card of cards) {
       const key = getCardKey(card);
       const state = key ? (customStateByCardKey.get(key) || 0) : 0;
-      if (key && state === 0) {
-        // If the card is no longer selected (e.g., Deselect All), clear armed flag.
-        if (!isSelectedByGame(card)) {
-          armedByCardKey.set(key, false);
-        }
-      }
       applyStateToCard(card, state);
     }
   }
