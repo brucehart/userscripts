@@ -1,153 +1,203 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.0
+// @version      1.1
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
+// @match        https://www.nytimes.com/crosswords/game/connections*
 // @grant        none
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const TILE_SELECTOR = [
-    'button[data-testid*="card"]',
-    'button[data-testid*="tile"]',
-    'button[class*="Card-module_card"]',
-    '[role="button"][data-testid*="card"]',
-    '[role="button"][class*="Card-module_card"]'
-  ].join(', ');
-
-  const CYCLE_STATES = 5; // 0 = none, 1-4 = yellow/green/blue/purple
-  const DATA_KEY = 'tmCycleState';
+  const CARD_SELECTOR = 'label[data-testid="card-label"]';
   const CYCLE_CLASS = 'tm-nyt-connections-cycle';
+  const CYCLE_ATTR = 'data-tm-connections-cycle';
+  const STATE_COUNT = 5; // 0 = none, 1-4 = yellow/green/blue/purple
+  const stateByCardKey = new Map();
+
+  let reapplyQueued = false;
 
   injectStyles();
-  document.addEventListener('click', onTileClick, true);
+  queueReapply();
+  document.addEventListener('click', onCardClick, true);
 
-  function onTileClick(event) {
-    const tile = getTileFromTarget(event.target);
-    if (!tile || isDisabled(tile)) {
+  const observer = new MutationObserver(() => {
+    queueReapply();
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+
+  function onCardClick(event) {
+    const card = getCardFromTarget(event.target);
+    if (!card || isDisabled(card)) {
       return;
     }
 
-    const cycleState = getCycleState(tile);
+    const key = getCardKey(card);
+    if (!key) {
+      return;
+    }
 
-    // While in a custom color state, keep the tile unselected and just cycle colors.
-    if (cycleState > 0) {
+    const state = stateByCardKey.get(key) || 0;
+
+    if (state > 0) {
+      if (isSelectedByGame(card)) {
+        // If selected somehow, let NYT deselect it, then restore current custom state.
+        setTimeout(() => {
+          const liveCard = findCardByKey(key);
+          if (liveCard && !isDisabled(liveCard)) {
+            applyStateToCard(liveCard, state);
+          }
+        }, 0);
+        return;
+      }
+
       event.preventDefault();
       event.stopImmediatePropagation();
-      applyCycleState(tile, (cycleState + 1) % CYCLE_STATES);
+
+      const nextState = (state + 1) % STATE_COUNT;
+      setState(key, nextState);
+      applyStateToCard(findCardByKey(key) || card, nextState);
       return;
     }
 
-    // If the game currently marks this tile as selected, let the native click deselect it,
-    // then place it into the first custom category color.
-    if (isSelectedByGame(tile)) {
-      const key = getTileKey(tile);
+    // First click is native select; second click on selected card becomes yellow.
+    if (isSelectedByGame(card)) {
       setTimeout(() => {
-        const liveTile = findTileByKey(key) || tile;
-        if (document.contains(liveTile) && !isDisabled(liveTile)) {
-          applyCycleState(liveTile, 1);
+        const liveCard = findCardByKey(key);
+        if (liveCard && !isDisabled(liveCard)) {
+          setState(key, 1);
+          applyStateToCard(liveCard, 1);
         }
       }, 0);
     }
   }
 
-  function getTileFromTarget(target) {
+  function getCardFromTarget(target) {
     if (!(target instanceof Element)) {
       return null;
     }
+    return target.closest(CARD_SELECTOR);
+  }
 
-    const tile = target.closest(TILE_SELECTOR);
-    if (!tile || !isWordTile(tile)) {
-      return null;
+  function getCardKey(card) {
+    const id = card.getAttribute('for');
+    if (id) {
+      return `id:${id}`;
     }
 
-    return tile;
+    const text = normalizeText(card.textContent || '');
+    return text ? `text:${text}` : '';
   }
 
-  function isWordTile(tile) {
-    const label = ((tile.getAttribute('aria-label') || '') + ' ' + (tile.textContent || '')).toLowerCase();
-    if (/(shuffle|submit|clear|deselect|mistake|continue|play|next|share|settings|help)/.test(label)) {
-      return false;
-    }
-
-    const text = (tile.textContent || '').trim();
-    return text.length > 0 && text.length <= 24;
-  }
-
-  function isDisabled(tile) {
-    return tile.hasAttribute('disabled') || tile.getAttribute('aria-disabled') === 'true';
-  }
-
-  function isSelectedByGame(tile) {
-    if (tile.getAttribute('aria-pressed') === 'true' || tile.getAttribute('aria-selected') === 'true') {
-      return true;
-    }
-
-    const className = typeof tile.className === 'string' ? tile.className : '';
-    return /selected/i.test(className);
-  }
-
-  function getCycleState(tile) {
-    const raw = tile.dataset[DATA_KEY] || '0';
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isNaN(parsed) ? 0 : parsed;
-  }
-
-  function applyCycleState(tile, state) {
-    if (state === 0) {
-      delete tile.dataset[DATA_KEY];
-      tile.classList.remove(CYCLE_CLASS);
-      return;
-    }
-
-    tile.dataset[DATA_KEY] = String(state);
-    tile.classList.add(CYCLE_CLASS);
-  }
-
-  function getTileKey(tile) {
-    return (tile.textContent || '').replace(/\s+/g, ' ').trim().toUpperCase();
-  }
-
-  function findTileByKey(key) {
+  function findCardByKey(key) {
     if (!key) {
       return null;
     }
 
-    const tiles = document.querySelectorAll(TILE_SELECTOR);
-    for (const tile of tiles) {
-      if (isWordTile(tile) && getTileKey(tile) === key) {
-        return tile;
+    const cards = document.querySelectorAll(CARD_SELECTOR);
+    for (const card of cards) {
+      if (getCardKey(card) === key) {
+        return card;
       }
     }
-
     return null;
+  }
+
+  function normalizeText(text) {
+    return text.replace(/\s+/g, ' ').trim().toUpperCase();
+  }
+
+  function setState(key, state) {
+    if (state === 0) {
+      stateByCardKey.delete(key);
+    } else {
+      stateByCardKey.set(key, state);
+    }
+  }
+
+  function queueReapply() {
+    if (reapplyQueued) {
+      return;
+    }
+    reapplyQueued = true;
+
+    requestAnimationFrame(() => {
+      reapplyQueued = false;
+      reapplyAllStates();
+    });
+  }
+
+  function reapplyAllStates() {
+    const cards = document.querySelectorAll(CARD_SELECTOR);
+    for (const card of cards) {
+      const key = getCardKey(card);
+      const state = key ? (stateByCardKey.get(key) || 0) : 0;
+      applyStateToCard(card, state);
+    }
+  }
+
+  function applyStateToCard(card, state) {
+    if (!card) {
+      return;
+    }
+
+    if (state === 0 || isSelectedByGame(card)) {
+      card.classList.remove(CYCLE_CLASS);
+      card.removeAttribute(CYCLE_ATTR);
+      return;
+    }
+
+    card.classList.add(CYCLE_CLASS);
+    card.setAttribute(CYCLE_ATTR, String(state));
+  }
+
+  function isDisabled(card) {
+    if (card.getAttribute('aria-disabled') === 'true') {
+      return true;
+    }
+
+    const input = card.querySelector('input');
+    return Boolean(input && input.disabled);
+  }
+
+  function isSelectedByGame(card) {
+    if (card.getAttribute('aria-pressed') === 'true' || card.getAttribute('aria-selected') === 'true') {
+      return true;
+    }
+
+    const className = typeof card.className === 'string' ? card.className : '';
+    if (className.indexOf('Card-module_selected') !== -1 || /\bselected\b/i.test(className)) {
+      return true;
+    }
+
+    const input = card.querySelector('input');
+    return Boolean(input && input.checked);
   }
 
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
-      .${CYCLE_CLASS} {
+      .${CYCLE_CLASS}:not([class*="Card-module_selected"]) {
         color: #1d1d1d !important;
         border-color: rgba(0, 0, 0, 0.35) !important;
         box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.22) !important;
       }
-      .${CYCLE_CLASS}[data-tm-cycle-state="1"] {
+      .${CYCLE_CLASS}[${CYCLE_ATTR}="1"]:not([class*="Card-module_selected"]) {
         background-color: #f9df6d !important;
       }
-      .${CYCLE_CLASS}[data-tm-cycle-state="2"] {
+      .${CYCLE_CLASS}[${CYCLE_ATTR}="2"]:not([class*="Card-module_selected"]) {
         background-color: #a0c35a !important;
       }
-      .${CYCLE_CLASS}[data-tm-cycle-state="3"] {
+      .${CYCLE_CLASS}[${CYCLE_ATTR}="3"]:not([class*="Card-module_selected"]) {
         background-color: #b0c4ef !important;
       }
-      .${CYCLE_CLASS}[data-tm-cycle-state="4"] {
+      .${CYCLE_CLASS}[${CYCLE_ATTR}="4"]:not([class*="Card-module_selected"]) {
         background-color: #ba81c5 !important;
       }
     `;
-    document.head.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
   }
 })();
