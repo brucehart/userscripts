@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.12
+// @version      1.13
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -100,9 +100,34 @@
   }
 
   function getCardKey(card) {
-    // Use visible text as the stable key; NYT's generated `for` id may change on re-render.
-    const text = normalizeText(card.innerText || card.textContent || '');
+    // Derive a stable key from the tile word/phrase only (exclude dynamic status text).
+    const text = extractStableTileText(card);
     return text ? `text:${text}` : '';
+  }
+
+  function extractStableTileText(card) {
+    const ariaLabel = card.getAttribute('aria-label');
+    if (ariaLabel) {
+      const ariaText = normalizeText(stripStateWords(ariaLabel.split(',')[0] || ''));
+      if (ariaText) {
+        return ariaText;
+      }
+    }
+
+    const rawText = card.innerText || card.textContent || '';
+    const lines = rawText.split(/\n+/);
+    for (const line of lines) {
+      const cleaned = normalizeText(stripStateWords(line));
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+
+    return '';
+  }
+
+  function stripStateWords(text) {
+    return text.replace(/\b(?:SELECTED|UNSELECTED|NOT\s+SELECTED)\b/gi, ' ');
   }
 
   function findCardByKey(key) {
@@ -228,7 +253,7 @@
     }
 
     const className = typeof card.className === 'string' ? card.className : '';
-    if (className.indexOf('Card-module_selected') !== -1 || /\bselected\b/i.test(className)) {
+    if (className.indexOf('Card-module_selected') !== -1) {
       return true;
     }
 
