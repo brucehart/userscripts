@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.11
+// @version      1.12
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -82,7 +82,7 @@
     if (currentPhase === 1) {
       // Keep this click native so NYT deselects the tile, then apply yellow.
       setCustomState(key, 1);
-      queueReapply();
+      queueReapplyAfterDeselection(key);
       return;
     }
 
@@ -100,13 +100,23 @@
   }
 
   function getCardKey(card) {
-    const id = card.getAttribute('for');
-    if (id) {
-      return `id:${id}`;
+    // Use visible text as the stable key; NYT's generated `for` id may change on re-render.
+    const text = normalizeText(card.innerText || card.textContent || '');
+    return text ? `text:${text}` : '';
+  }
+
+  function findCardByKey(key) {
+    if (!key) {
+      return null;
     }
 
-    const text = normalizeText(card.textContent || '');
-    return text ? `text:${text}` : '';
+    const cards = document.querySelectorAll(CARD_SELECTOR);
+    for (const card of cards) {
+      if (getCardKey(card) === key) {
+        return card;
+      }
+    }
+    return null;
   }
 
   function normalizeText(text) {
@@ -143,6 +153,23 @@
 
     setCustomState(key, phase - 1);
     queueReapply();
+  }
+
+  function queueReapplyAfterDeselection(key, attempt = 0) {
+    requestAnimationFrame(() => {
+      const card = findCardByKey(key);
+      if (!card || isDisabled(card)) {
+        queueReapply();
+        return;
+      }
+
+      if (!isSelectedByGame(card) || attempt >= 8) {
+        queueReapply();
+        return;
+      }
+
+      queueReapplyAfterDeselection(key, attempt + 1);
+    });
   }
 
   function queueReapply() {
