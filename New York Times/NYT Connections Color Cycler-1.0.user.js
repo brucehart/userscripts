@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.9
+// @version      1.10
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -47,8 +47,12 @@
       return;
     }
 
-    // Block NYT pointer handlers so click progression is controlled by this script.
-    event.stopImmediatePropagation();
+    const phase = getCyclePhase(key, card);
+    // Let phase 0 (unselected -> native selected) run through NYT handlers.
+    // Intercept every other phase so only one scripted step happens per click.
+    if (phase > 0) {
+      event.stopImmediatePropagation();
+    }
   }
 
   function onCardClick(event) {
@@ -66,10 +70,15 @@
       return;
     }
 
+    const currentPhase = getCyclePhase(key, card);
+    if (currentPhase === 0) {
+      // First click should be the site's native selected behavior.
+      setCustomState(key, 0);
+      return;
+    }
+
     event.preventDefault();
     event.stopImmediatePropagation();
-
-    const currentPhase = getCyclePhase(key, card);
     const nextPhase = currentPhase >= MAX_CYCLE_PHASE ? 0 : currentPhase + 1;
     applyPhase(key, card, nextPhase);
   }
