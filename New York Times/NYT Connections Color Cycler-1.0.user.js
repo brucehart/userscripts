@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.6
+// @version      1.7
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -16,10 +16,8 @@
   const CARD_SELECTOR = 'label[data-testid="card-label"]';
   const CYCLE_CLASS = 'tm-nyt-connections-cycle';
   const CYCLE_ATTR = 'data-tm-connections-cycle';
-  const STATE_COUNT = 5; // 0 = none, 1-4 = yellow/green/blue/purple
-  const stateByCardKey = new Map();
-  const actionVersionByCardKey = new Map();
-  const armedByCardKey = new Map(); // true after native-select click, false otherwise
+  const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
+  const customStateByCardKey = new Map();
 
   let reapplyQueued = false;
 
@@ -34,25 +32,24 @@
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   function onPointerDown(event) {
+    if (!event.isTrusted) {
+      return;
+    }
+
     const card = getCardFromTarget(event.target);
     if (!card || isDisabled(card)) {
       return;
     }
 
-    const key = getCardKey(card);
-    if (!key) {
-      return;
-    }
-
-    const state = stateByCardKey.get(key) || 0;
-
-    if (state > 0) {
-      // Block NYT's own pointer handlers for custom cycle transitions.
-      event.stopImmediatePropagation();
-    }
+    // Prevent NYT pointer handlers from changing card state unexpectedly.
+    event.stopImmediatePropagation();
   }
 
   function onCardClick(event) {
+    if (!event.isTrusted) {
+      return;
+    }
+
     const card = getCardFromTarget(event.target);
     if (!card || isDisabled(card)) {
       return;
@@ -63,32 +60,34 @@
       return;
     }
 
-    const state = stateByCardKey.get(key) || 0;
+    // Own all card clicks so behavior is deterministic.
+    event.preventDefault();
+    event.stopImmediatePropagation();
 
-    if (state > 0) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
+    const customState = customStateByCardKey.get(key) || 0;
+    const selected = isSelectedByGame(card);
 
-      const actionVersion = bumpActionVersion(key);
-      const nextState = (state + 1) % STATE_COUNT;
-      setState(key, nextState);
-      if (nextState === 0) {
-        armedByCardKey.set(key, false);
+    if (customState > 0) {
+      const nextState = customState >= MAX_COLOR_STATE ? 0 : customState + 1;
+      setCustomState(key, nextState);
+      if (selected) {
+        setNativeSelected(key, false);
+      } else {
+        queueReapply();
       }
-      applyStateToCard(findCardByKey(key) || card, nextState);
       return;
     }
 
-    // state 0 + armed means this is the second click; let NYT deselect natively, then set yellow.
-    if (armedByCardKey.get(key) === true) {
-      armedByCardKey.set(key, false);
-      const actionVersion = bumpActionVersion(key);
-      scheduleApplyAfterNativeToggle(key, 1, actionVersion);
+    if (selected) {
+      // Selected -> Yellow (and unselected).
+      setCustomState(key, 1);
+      setNativeSelected(key, false);
       return;
     }
 
-    // First click path stays native.
-    armedByCardKey.set(key, true);
+    // Plain unselected -> native selected (dark gray).
+    setCustomState(key, 0);
+    setNativeSelected(key, true);
   }
 
   function getCardFromTarget(target) {
@@ -126,44 +125,61 @@
     return text.replace(/\s+/g, ' ').trim().toUpperCase();
   }
 
-  function setState(key, state) {
+  function setCustomState(key, state) {
     if (state === 0) {
-      stateByCardKey.delete(key);
+      customStateByCardKey.delete(key);
     } else {
-      stateByCardKey.set(key, state);
+      customStateByCardKey.set(key, state);
     }
   }
 
-  function bumpActionVersion(key) {
-    const next = (actionVersionByCardKey.get(key) || 0) + 1;
-    actionVersionByCardKey.set(key, next);
-    return next;
-  }
-
-  function isCurrentActionVersion(key, version) {
-    return (actionVersionByCardKey.get(key) || 0) === version;
-  }
-
-  function scheduleApplyAfterNativeToggle(key, state, version, attempt = 0) {
+  function setNativeSelected(key, desiredSelected, attempt = 0) {
     requestAnimationFrame(() => {
-      if (!isCurrentActionVersion(key, version)) {
+      const card = findCardByKey(key);
+      if (!card || isDisabled(card)) {
         return;
       }
 
-      const liveCard = findCardByKey(key);
-      if (!liveCard || isDisabled(liveCard)) {
+      if (isSelectedByGame(card) === desiredSelected) {
+        queueReapply();
         return;
       }
 
-      // Wait for NYT to finish deselect rendering.
-      if (isSelectedByGame(liveCard) && attempt < 12) {
-        scheduleApplyAfterNativeToggle(key, state, version, attempt + 1);
-        return;
-      }
+      dispatchNativeToggle(card);
 
-      setState(key, state);
-      applyStateToCard(liveCard, state);
+      if (attempt < 8) {
+        setNativeSelected(key, desiredSelected, attempt + 1);
+      } else {
+        queueReapply();
+      }
     });
+  }
+
+  function dispatchNativeToggle(card) {
+    const forId = card.getAttribute('for');
+    if (forId) {
+      const input = document.getElementById(forId);
+      if (input && typeof input.click === 'function') {
+        input.click();
+        return;
+      }
+    }
+
+    const inputInside = card.querySelector('input');
+    if (inputInside && typeof inputInside.click === 'function') {
+      inputInside.click();
+      return;
+    }
+
+    const target = card.firstElementChild || card;
+    target.dispatchEvent(new KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      keyCode: 32,
+      which: 32,
+      bubbles: true,
+      cancelable: true
+    }));
   }
 
   function queueReapply() {
@@ -182,7 +198,7 @@
     const cards = document.querySelectorAll(CARD_SELECTOR);
     for (const card of cards) {
       const key = getCardKey(card);
-      const state = key ? (stateByCardKey.get(key) || 0) : 0;
+      const state = key ? (customStateByCardKey.get(key) || 0) : 0;
       applyStateToCard(card, state);
     }
   }
