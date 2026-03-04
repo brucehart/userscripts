@@ -48,11 +48,10 @@
     }
 
     const phase = getCyclePhase(key, card);
-    // Let phase 0 and phase 1 run native NYT handlers:
-    // 0: unselected -> selected
-    // 1: selected -> deselected (while we queue yellow state)
-    // Intercept only custom color phases.
-    if (phase > 1) {
+    // Let phase 0 run native NYT handlers (unselected -> selected).
+    // Block native handlers for phase 1 (selected -> yellow) and all
+    // custom color phases so we control the full transition.
+    if (phase >= 1) {
       event.stopImmediatePropagation();
     }
   }
@@ -80,7 +79,14 @@
     }
 
     if (currentPhase === 1) {
-      // Keep this click native so NYT deselects the tile, then apply yellow.
+      // Native pointerdown is blocked for this phase, so programmatically
+      // deselect the tile, then apply yellow.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const input = card.querySelector('input');
+      if (input) {
+        input.click();
+      }
       setCustomState(key, 1);
       queueReapplyAfterDeselection(key);
       return;
