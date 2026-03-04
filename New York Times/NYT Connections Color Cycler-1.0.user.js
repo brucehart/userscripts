@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.7
+// @version      1.8
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -18,6 +18,7 @@
   const CYCLE_ATTR = 'data-tm-connections-cycle';
   const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
   const customStateByCardKey = new Map();
+  const armedByCardKey = new Map(); // true after first native select click
 
   let reapplyQueued = false;
 
@@ -41,8 +42,17 @@
       return;
     }
 
-    // Prevent NYT pointer handlers from changing card state unexpectedly.
-    event.stopImmediatePropagation();
+    const key = getCardKey(card);
+    if (!key) {
+      return;
+    }
+
+    const customState = customStateByCardKey.get(key) || 0;
+    const armed = armedByCardKey.get(key) === true;
+    if (customState > 0 || armed) {
+      // Intercept only when we are in custom mode or on second-click transition.
+      event.stopImmediatePropagation();
+    }
   }
 
   function onCardClick(event) {
@@ -60,16 +70,18 @@
       return;
     }
 
-    // Own all card clicks so behavior is deterministic.
-    event.preventDefault();
-    event.stopImmediatePropagation();
-
     const customState = customStateByCardKey.get(key) || 0;
     const selected = isSelectedByGame(card);
 
     if (customState > 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+
       const nextState = customState >= MAX_COLOR_STATE ? 0 : customState + 1;
       setCustomState(key, nextState);
+      if (nextState === 0) {
+        armedByCardKey.set(key, false);
+      }
       if (selected) {
         setNativeSelected(key, false);
       } else {
@@ -78,16 +90,22 @@
       return;
     }
 
-    if (selected) {
-      // Selected -> Yellow (and unselected).
+    const armed = armedByCardKey.get(key) === true;
+
+    if (armed) {
+      // Second click: selected -> yellow.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      armedByCardKey.set(key, false);
       setCustomState(key, 1);
       setNativeSelected(key, false);
       return;
     }
 
-    // Plain unselected -> native selected (dark gray).
-    setCustomState(key, 0);
-    setNativeSelected(key, true);
+    // First click: allow native selected state.
+    if (!selected) {
+      armedByCardKey.set(key, true);
+    }
   }
 
   function getCardFromTarget(target) {
@@ -199,6 +217,12 @@
     for (const card of cards) {
       const key = getCardKey(card);
       const state = key ? (customStateByCardKey.get(key) || 0) : 0;
+      if (key && state === 0) {
+        // If the card is no longer selected (e.g., Deselect All), clear armed flag.
+        if (!isSelectedByGame(card)) {
+          armedByCardKey.set(key, false);
+        }
+      }
       applyStateToCard(card, state);
     }
   }
