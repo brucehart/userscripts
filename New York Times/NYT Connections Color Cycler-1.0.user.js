@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.10
+// @version      1.11
 // @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -48,9 +48,11 @@
     }
 
     const phase = getCyclePhase(key, card);
-    // Let phase 0 (unselected -> native selected) run through NYT handlers.
-    // Intercept every other phase so only one scripted step happens per click.
-    if (phase > 0) {
+    // Let phase 0 and phase 1 run native NYT handlers:
+    // 0: unselected -> selected
+    // 1: selected -> deselected (while we queue yellow state)
+    // Intercept only custom color phases.
+    if (phase > 1) {
       event.stopImmediatePropagation();
     }
   }
@@ -77,10 +79,17 @@
       return;
     }
 
+    if (currentPhase === 1) {
+      // Keep this click native so NYT deselects the tile, then apply yellow.
+      setCustomState(key, 1);
+      queueReapply();
+      return;
+    }
+
     event.preventDefault();
     event.stopImmediatePropagation();
     const nextPhase = currentPhase >= MAX_CYCLE_PHASE ? 0 : currentPhase + 1;
-    applyPhase(key, card, nextPhase);
+    applyPhase(key, nextPhase);
   }
 
   function getCardFromTarget(target) {
@@ -98,20 +107,6 @@
 
     const text = normalizeText(card.textContent || '');
     return text ? `text:${text}` : '';
-  }
-
-  function findCardByKey(key) {
-    if (!key) {
-      return null;
-    }
-
-    const cards = document.querySelectorAll(CARD_SELECTOR);
-    for (const card of cards) {
-      if (getCardKey(card) === key) {
-        return card;
-      }
-    }
-    return null;
   }
 
   function normalizeText(text) {
@@ -139,84 +134,15 @@
     return 0;
   }
 
-  function applyPhase(key, card, phase) {
-    const selected = isSelectedByGame(card);
-
-    if (phase === 0) {
+  function applyPhase(key, phase) {
+    if (phase === 0 || phase === 1) {
       setCustomState(key, 0);
-      if (selected) {
-        setNativeSelected(key, false);
-      } else {
-        queueReapply();
-      }
-      return;
-    }
-
-    if (phase === 1) {
-      setCustomState(key, 0);
-      if (!selected) {
-        setNativeSelected(key, true);
-      } else {
-        queueReapply();
-      }
+      queueReapply();
       return;
     }
 
     setCustomState(key, phase - 1);
-    if (selected) {
-      setNativeSelected(key, false);
-    } else {
-      queueReapply();
-    }
-  }
-
-  function setNativeSelected(key, desiredSelected, attempt = 0) {
-    requestAnimationFrame(() => {
-      const card = findCardByKey(key);
-      if (!card || isDisabled(card)) {
-        return;
-      }
-
-      if (isSelectedByGame(card) === desiredSelected) {
-        queueReapply();
-        return;
-      }
-
-      dispatchNativeToggle(card);
-
-      if (attempt < 8) {
-        setNativeSelected(key, desiredSelected, attempt + 1);
-      } else {
-        queueReapply();
-      }
-    });
-  }
-
-  function dispatchNativeToggle(card) {
-    const forId = card.getAttribute('for');
-    if (forId) {
-      const input = document.getElementById(forId);
-      if (input && typeof input.click === 'function') {
-        input.click();
-        return;
-      }
-    }
-
-    const inputInside = card.querySelector('input');
-    if (inputInside && typeof inputInside.click === 'function') {
-      inputInside.click();
-      return;
-    }
-
-    const target = card.firstElementChild || card;
-    target.dispatchEvent(new KeyboardEvent('keydown', {
-      key: ' ',
-      code: 'Space',
-      keyCode: 32,
-      which: 32,
-      bubbles: true,
-      cancelable: true
-    }));
+    queueReapply();
   }
 
   function queueReapply() {
