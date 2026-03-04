@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.5
+// @version      1.6
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
 // @match        https://www.nytimes.com/crosswords/game/connections*
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
@@ -18,7 +19,7 @@
   const STATE_COUNT = 5; // 0 = none, 1-4 = yellow/green/blue/purple
   const stateByCardKey = new Map();
   const actionVersionByCardKey = new Map();
-  const pointerWasSelectedByCardKey = new Map();
+  const armedByCardKey = new Map(); // true after native-select click, false otherwise
 
   let reapplyQueued = false;
 
@@ -44,8 +45,6 @@
     }
 
     const state = stateByCardKey.get(key) || 0;
-    const wasSelected = isSelectedByGame(card);
-    pointerWasSelectedByCardKey.set(key, wasSelected);
 
     if (state > 0) {
       // Block NYT's own pointer handlers for custom cycle transitions.
@@ -65,28 +64,31 @@
     }
 
     const state = stateByCardKey.get(key) || 0;
-    const wasSelectedOnPointerDown = pointerWasSelectedByCardKey.get(key) === true;
-    pointerWasSelectedByCardKey.delete(key);
-
-    const actionVersion = bumpActionVersion(key);
 
     if (state > 0) {
       event.preventDefault();
       event.stopImmediatePropagation();
 
+      const actionVersion = bumpActionVersion(key);
       const nextState = (state + 1) % STATE_COUNT;
       setState(key, nextState);
+      if (nextState === 0) {
+        armedByCardKey.set(key, false);
+      }
       applyStateToCard(findCardByKey(key) || card, nextState);
       return;
     }
 
-    // State 0:
-    // - If card was already selected before this click, let NYT deselect naturally,
-    //   then set our first color (yellow).
-    // - Otherwise (normal unselected first click), keep native behavior only.
-    if (wasSelectedOnPointerDown) {
+    // state 0 + armed means this is the second click; let NYT deselect natively, then set yellow.
+    if (armedByCardKey.get(key) === true) {
+      armedByCardKey.set(key, false);
+      const actionVersion = bumpActionVersion(key);
       scheduleApplyAfterNativeToggle(key, 1, actionVersion);
+      return;
     }
+
+    // First click path stays native.
+    armedByCardKey.set(key, true);
   }
 
   function getCardFromTarget(target) {
@@ -154,7 +156,7 @@
       }
 
       // Wait for NYT to finish deselect rendering.
-      if (isSelectedByGame(liveCard) && attempt < 8) {
+      if (isSelectedByGame(liveCard) && attempt < 12) {
         scheduleApplyAfterNativeToggle(key, state, version, attempt + 1);
         return;
       }
@@ -210,12 +212,24 @@
   }
 
   function isSelectedByGame(card) {
-    if (card.getAttribute('aria-pressed') === 'true' || card.getAttribute('aria-selected') === 'true') {
+    if (
+      card.getAttribute('aria-pressed') === 'true' ||
+      card.getAttribute('aria-selected') === 'true' ||
+      card.getAttribute('aria-checked') === 'true' ||
+      card.getAttribute('data-state') === 'selected'
+    ) {
       return true;
     }
 
     const className = typeof card.className === 'string' ? card.className : '';
     if (className.indexOf('Card-module_selected') !== -1 || /\bselected\b/i.test(className)) {
+      return true;
+    }
+
+    const selectedDescendant = card.querySelector(
+      'input:checked, [aria-checked="true"], [aria-pressed="true"], [aria-selected="true"], [data-state="selected"], [class*="Card-module_selected"]'
+    );
+    if (selectedDescendant) {
       return true;
     }
 
