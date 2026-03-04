@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.3
+// @version      1.4
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -18,6 +18,7 @@
   const STATE_COUNT = 5; // 0 = none, 1-4 = yellow/green/blue/purple
   const stateByCardKey = new Map();
   const actionVersionByCardKey = new Map();
+  const pointerWasSelectedByCardKey = new Map();
 
   let reapplyQueued = false;
 
@@ -43,7 +44,10 @@
     }
 
     const state = stateByCardKey.get(key) || 0;
-    if (shouldIntercept(state, card)) {
+    const wasSelected = isSelectedByGame(card);
+    pointerWasSelectedByCardKey.set(key, wasSelected);
+
+    if (state > 0 || wasSelected) {
       // Block NYT's own pointer handlers for custom cycle transitions.
       event.stopImmediatePropagation();
     }
@@ -61,7 +65,11 @@
     }
 
     const state = stateByCardKey.get(key) || 0;
-    if (!shouldIntercept(state, card)) {
+    const wasSelectedOnPointerDown = pointerWasSelectedByCardKey.get(key) === true;
+    pointerWasSelectedByCardKey.delete(key);
+
+    const shouldInterceptClick = state > 0 || wasSelectedOnPointerDown;
+    if (!shouldInterceptClick) {
       return;
     }
 
@@ -133,10 +141,6 @@
 
   function isCurrentActionVersion(key, version) {
     return (actionVersionByCardKey.get(key) || 0) === version;
-  }
-
-  function shouldIntercept(state, card) {
-    return state > 0 || isSelectedByGame(card);
   }
 
   function applyStateWithRetry(key, state, version, attempt = 0) {
