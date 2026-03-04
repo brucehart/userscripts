@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.2
+// @version      1.3
 // @description  Keep the first click native, then cycle category colors on repeated clicks for Connections words.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -23,12 +23,31 @@
 
   injectStyles();
   queueReapply();
-  document.addEventListener('click', onCardClick, true);
+  window.addEventListener('pointerdown', onPointerDown, true);
+  window.addEventListener('click', onCardClick, true);
 
   const observer = new MutationObserver(() => {
     queueReapply();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
+
+  function onPointerDown(event) {
+    const card = getCardFromTarget(event.target);
+    if (!card || isDisabled(card)) {
+      return;
+    }
+
+    const key = getCardKey(card);
+    if (!key) {
+      return;
+    }
+
+    const state = stateByCardKey.get(key) || 0;
+    if (shouldIntercept(state, card)) {
+      // Block NYT's own pointer handlers for custom cycle transitions.
+      event.stopImmediatePropagation();
+    }
+  }
 
   function onCardClick(event) {
     const card = getCardFromTarget(event.target);
@@ -40,30 +59,27 @@
     if (!key) {
       return;
     }
-    const actionVersion = bumpActionVersion(key);
 
     const state = stateByCardKey.get(key) || 0;
-
-    if (state > 0) {
-      if (isSelectedByGame(card)) {
-        // Let NYT deselect it, then restore current custom state.
-        scheduleApplyState(key, state, actionVersion);
-        return;
-      }
-
-      event.preventDefault();
-      event.stopImmediatePropagation();
-
-      const nextState = (state + 1) % STATE_COUNT;
-      setState(key, nextState);
-      applyStateToCard(findCardByKey(key) || card, nextState);
+    if (!shouldIntercept(state, card)) {
       return;
     }
 
-    // First click is native select; second click on selected card becomes yellow.
-    if (isSelectedByGame(card)) {
-      scheduleApplyState(key, 1, actionVersion);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    const actionVersion = bumpActionVersion(key);
+
+    if (state > 0) {
+      const nextState = (state + 1) % STATE_COUNT;
+      setState(key, nextState);
+      applyStateWithRetry(key, nextState, actionVersion);
+      return;
     }
+
+    // state 0 + selected by game -> second click becomes yellow.
+    setState(key, 1);
+    applyStateWithRetry(key, 1, actionVersion);
   }
 
   function getCardFromTarget(target) {
@@ -119,9 +135,12 @@
     return (actionVersionByCardKey.get(key) || 0) === version;
   }
 
-  function scheduleApplyState(key, state, version, attempt = 0) {
-    const delayMs = attempt === 0 ? 0 : 16;
-    setTimeout(() => {
+  function shouldIntercept(state, card) {
+    return state > 0 || isSelectedByGame(card);
+  }
+
+  function applyStateWithRetry(key, state, version, attempt = 0) {
+    requestAnimationFrame(() => {
       if (!isCurrentActionVersion(key, version)) {
         return;
       }
@@ -131,15 +150,26 @@
         return;
       }
 
-      // If React has not completed the deselect render yet, retry briefly.
-      if (isSelectedByGame(liveCard) && attempt < 3) {
-        scheduleApplyState(key, state, version, attempt + 1);
+      if (isSelectedByGame(liveCard) && attempt < 4) {
+        deselectCard(liveCard);
+        applyStateWithRetry(key, state, version, attempt + 1);
         return;
       }
 
-      setState(key, state);
       applyStateToCard(liveCard, state);
-    }, delayMs);
+    });
+  }
+
+  function deselectCard(card) {
+    const target = card.firstElementChild || card;
+    target.dispatchEvent(new KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      keyCode: 32,
+      which: 32,
+      bubbles: true,
+      cancelable: true
+    }));
   }
 
   function queueReapply() {
