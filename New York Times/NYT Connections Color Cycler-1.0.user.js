@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.3
+// @version      1.4
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -103,6 +103,7 @@
           event.stopImmediatePropagation();
         }
         queueReapplyAfterDeselection(key);
+        queueFallbackDeselection(key);
         return;
       }
 
@@ -128,6 +129,7 @@
         event.stopImmediatePropagation();
       }
       queueReapplyAfterDeselection(key);
+      queueFallbackDeselection(key);
       return;
     }
 
@@ -396,8 +398,13 @@
 
     for (const { card, key } of selectedCards) {
       setCustomState(key, state);
-      toggleCardSelectionOff(card);
       queueReapplyAfterDeselection(key);
+    }
+
+    if (!clickDeselectAllButton()) {
+      for (const { card } of selectedCards) {
+        toggleCardSelectionOff(card);
+      }
     }
 
     queueReapply();
@@ -425,80 +432,55 @@
 
   function toggleCardSelectionOff(card) {
     const input = card.querySelector('input');
-    if (input && !input.disabled) {
-      setInputChecked(input, false);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    dispatchPointerSequence(card);
-  }
-
-  function setInputChecked(input, checked) {
-    const prototype = Object.getPrototypeOf(input);
-    const descriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, 'checked') : null;
-    if (descriptor && typeof descriptor.set === 'function') {
-      descriptor.set.call(input, checked);
+    if (input && !input.disabled && typeof input.click === 'function') {
+      input.click();
       return;
     }
 
-    input.checked = checked;
+    if (typeof card.click === 'function') {
+      card.click();
+    }
   }
 
-  function dispatchPointerSequence(target) {
-    if (!target) {
-      return;
+  function queueFallbackDeselection(key) {
+    requestAnimationFrame(() => {
+      const card = findCardByKey(key);
+      if (!card || isDisabled(card) || !isSelectedByGame(card)) {
+        return;
+      }
+
+      toggleCardSelectionOff(card);
+      queueReapplyAfterDeselection(key);
+    });
+  }
+
+  function clickDeselectAllButton() {
+    const button = findControlButton('DESELECT ALL');
+    if (!button || button.disabled) {
+      return false;
     }
 
-    const pointerEventInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      button: 0,
-      buttons: 1,
-      pointerId: 1,
-      pointerType: 'mouse',
-      isPrimary: true
-    };
-    if (typeof PointerEvent === 'function') {
-      target.dispatchEvent(new PointerEvent('pointerdown', pointerEventInit));
+    button.click();
+    return true;
+  }
+
+  function findControlButton(labelText) {
+    const normalizedLabel = normalizeText(labelText);
+    const buttons = document.querySelectorAll('button');
+
+    for (const button of buttons) {
+      const ariaLabel = button.getAttribute('aria-label');
+      if (ariaLabel && normalizeText(ariaLabel) === normalizedLabel) {
+        return button;
+      }
+
+      const text = button.textContent || '';
+      if (normalizeText(text) === normalizedLabel) {
+        return button;
+      }
     }
 
-    target.dispatchEvent(new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      button: 0,
-      buttons: 1
-    }));
-
-    if (typeof PointerEvent === 'function') {
-      target.dispatchEvent(new PointerEvent('pointerup', {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        button: 0,
-        buttons: 0,
-        pointerId: 1,
-        pointerType: 'mouse',
-        isPrimary: true
-      }));
-    }
-
-    target.dispatchEvent(new MouseEvent('mouseup', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      button: 0,
-      buttons: 0
-    }));
-    target.dispatchEvent(new MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      button: 0,
-      buttons: 0
-    }));
+    return null;
   }
 
   function clearAllCustomColors() {
