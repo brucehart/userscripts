@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.0
-// @description  Cycle Connections words through native selected, yellow, green, blue, and purple states.
+// @version      1.1
+// @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
 // @match        https://www.nytimes.com/crosswords/game/connections*
@@ -16,8 +16,16 @@
   const CARD_SELECTOR = 'label[data-testid="card-label"]';
   const CYCLE_CLASS = 'tm-nyt-connections-cycle';
   const CYCLE_ATTR = 'data-tm-connections-cycle';
+  const TOOLBAR_ID = 'tm-nyt-connections-toolbar';
+  const TOOLBAR_FLOAT_ATTR = 'data-tm-floating';
   const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
   const MAX_CYCLE_PHASE = MAX_COLOR_STATE + 1; // 0=unselected,1=selected,2-5=colors
+  const COLOR_BUTTONS = [
+    { label: 'Yellow', state: 1, bg: '#f9df6d', text: '#1d1d1d' },
+    { label: 'Blue', state: 3, bg: '#b0c4ef', text: '#1d1d1d' },
+    { label: 'Green', state: 2, bg: '#a0c35a', text: '#1d1d1d' },
+    { label: 'Purple', state: 4, bg: '#ba81c5', text: '#1d1d1d' }
+  ];
   const customStateByCardKey = new Map();
   const pointerDownPhaseByKey = new Map(); // track phase at pointerdown time
 
@@ -237,6 +245,7 @@
 
     requestAnimationFrame(() => {
       reapplyQueued = false;
+      ensureToolbar();
       reapplyAllStates();
     });
   }
@@ -300,6 +309,136 @@
     return Boolean(input && input.checked);
   }
 
+  function ensureToolbar() {
+    if (!document.body) {
+      return;
+    }
+
+    const mountPoint = findToolbarMountPoint();
+    let toolbar = document.getElementById(TOOLBAR_ID);
+
+    if (!toolbar) {
+      toolbar = createToolbar();
+    }
+
+    if (mountPoint) {
+      toolbar.removeAttribute(TOOLBAR_FLOAT_ATTR);
+      if (toolbar.parentElement !== mountPoint.parentElement || toolbar.previousElementSibling !== mountPoint) {
+        mountPoint.insertAdjacentElement('afterend', toolbar);
+      }
+      return;
+    }
+
+    toolbar.setAttribute(TOOLBAR_FLOAT_ATTR, 'true');
+    if (toolbar.parentElement !== document.body) {
+      document.body.appendChild(toolbar);
+    }
+  }
+
+  function findToolbarMountPoint() {
+    const controlsButton = document.querySelector(
+      'button[data-testid="shuffle-btn"], button[data-testid="submit-btn"], button[aria-label="Shuffle"], button[aria-label="Submit"]'
+    );
+    if (!controlsButton) {
+      return null;
+    }
+
+    let node = controlsButton.parentElement;
+    while (node && node !== document.body) {
+      if (node.querySelectorAll('button').length >= 2) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+
+    return controlsButton.parentElement;
+  }
+
+  function createToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.id = TOOLBAR_ID;
+
+    for (const config of COLOR_BUTTONS) {
+      toolbar.appendChild(createToolbarButton(config.label, config.bg, config.text, () => {
+        applyColorToSelectedCards(config.state);
+      }));
+    }
+
+    toolbar.appendChild(createToolbarButton('Clear', '#ffffff', '#1d1d1d', clearAllCustomColors));
+    return toolbar;
+  }
+
+  function createToolbarButton(label, backgroundColor, textColor, onClick) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.className = 'tm-nyt-connections-toolbar-button';
+    button.style.setProperty('--tm-button-bg', backgroundColor);
+    button.style.setProperty('--tm-button-text', textColor);
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  function applyColorToSelectedCards(state) {
+    const selectedCards = getSelectedCards();
+    if (selectedCards.length === 0) {
+      return;
+    }
+
+    for (const { card, key } of selectedCards) {
+      setCustomState(key, state);
+      toggleCardSelectionOff(card);
+      queueReapplyAfterDeselection(key);
+    }
+
+    queueReapply();
+  }
+
+  function getSelectedCards() {
+    const cards = document.querySelectorAll(CARD_SELECTOR);
+    const selectedCards = [];
+
+    for (const card of cards) {
+      if (isDisabled(card) || !isSelectedByGame(card)) {
+        continue;
+      }
+
+      const key = getCardKey(card);
+      if (!key) {
+        continue;
+      }
+
+      selectedCards.push({ card, key });
+    }
+
+    return selectedCards;
+  }
+
+  function toggleCardSelectionOff(card) {
+    const input = card.querySelector('input');
+    if (input && !input.disabled && typeof input.click === 'function') {
+      input.click();
+      return;
+    }
+
+    if (typeof card.click === 'function') {
+      card.click();
+    }
+  }
+
+  function clearAllCustomColors() {
+    if (customStateByCardKey.size === 0) {
+      return;
+    }
+
+    customStateByCardKey.clear();
+    queueReapply();
+  }
+
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
@@ -319,6 +458,38 @@
       }
       .${CYCLE_CLASS}[${CYCLE_ATTR}="4"]:not([class*="Card-module_selected"]) {
         background-color: #ba81c5 !important;
+      }
+      #${TOOLBAR_ID} {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-top: 12px;
+        z-index: 9999;
+      }
+      #${TOOLBAR_ID}[${TOOLBAR_FLOAT_ATTR}="true"] {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        margin-top: 0;
+        padding: 10px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+      }
+      #${TOOLBAR_ID} .tm-nyt-connections-toolbar-button {
+        appearance: none;
+        border: 1px solid rgba(0, 0, 0, 0.2);
+        border-radius: 999px;
+        padding: 8px 14px;
+        font: inherit;
+        font-weight: 700;
+        color: var(--tm-button-text);
+        background: var(--tm-button-bg);
+        cursor: pointer;
+      }
+      #${TOOLBAR_ID} .tm-nyt-connections-toolbar-button:hover {
+        filter: brightness(0.97);
       }
     `;
     (document.head || document.documentElement).appendChild(style);
