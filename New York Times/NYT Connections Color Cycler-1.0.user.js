@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.1
+// @version      1.3
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -90,16 +90,19 @@
     pointerDownPhaseByKey.delete(key);
 
     const currentPhase = savedPhase !== undefined ? savedPhase : getCyclePhase(key, card);
+    const liveSelected = isSelectedByGame(card);
     const ctrlPressed = event.ctrlKey;
 
     if (ctrlPressed) {
       if (currentPhase === 1) {
-        // Native pointerdown already ran and deselected the card.
-        // Prevent click from re-selecting and keep custom colors cleared.
-        event.preventDefault();
-        event.stopImmediatePropagation();
         setCustomState(key, 0);
-        queueReapply();
+        if (!liveSelected) {
+          // The card was already deselected earlier in the event chain.
+          // Stop the click from re-selecting it.
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        queueReapplyAfterDeselection(key);
         return;
       }
 
@@ -117,11 +120,13 @@
     }
 
     if (currentPhase === 1) {
-      // Native pointerdown already ran and deselected the card.
-      // Prevent the click from re-selecting it and apply yellow.
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      // The site may deselect on pointerdown or click depending on the target.
+      // Only block the click if the card is already deselected.
       setCustomState(key, 1);
+      if (!liveSelected) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
       queueReapplyAfterDeselection(key);
       return;
     }
@@ -323,8 +328,8 @@
 
     if (mountPoint) {
       toolbar.removeAttribute(TOOLBAR_FLOAT_ATTR);
-      if (toolbar.parentElement !== mountPoint.parentElement || toolbar.previousElementSibling !== mountPoint) {
-        mountPoint.insertAdjacentElement('afterend', toolbar);
+      if (toolbar.parentElement !== mountPoint.parentElement || toolbar.nextElementSibling !== mountPoint) {
+        mountPoint.insertAdjacentElement('beforebegin', toolbar);
       }
       return;
     }
@@ -420,14 +425,80 @@
 
   function toggleCardSelectionOff(card) {
     const input = card.querySelector('input');
-    if (input && !input.disabled && typeof input.click === 'function') {
-      input.click();
+    if (input && !input.disabled) {
+      setInputChecked(input, false);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    dispatchPointerSequence(card);
+  }
+
+  function setInputChecked(input, checked) {
+    const prototype = Object.getPrototypeOf(input);
+    const descriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, 'checked') : null;
+    if (descriptor && typeof descriptor.set === 'function') {
+      descriptor.set.call(input, checked);
       return;
     }
 
-    if (typeof card.click === 'function') {
-      card.click();
+    input.checked = checked;
+  }
+
+  function dispatchPointerSequence(target) {
+    if (!target) {
+      return;
     }
+
+    const pointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true
+    };
+    if (typeof PointerEvent === 'function') {
+      target.dispatchEvent(new PointerEvent('pointerdown', pointerEventInit));
+    }
+
+    target.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 1
+    }));
+
+    if (typeof PointerEvent === 'function') {
+      target.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        button: 0,
+        buttons: 0,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true
+      }));
+    }
+
+    target.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 0
+    }));
+    target.dispatchEvent(new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 0
+    }));
   }
 
   function clearAllCustomColors() {
@@ -464,7 +535,9 @@
         flex-wrap: wrap;
         gap: 8px;
         align-items: center;
-        margin-top: 12px;
+        justify-content: center;
+        width: 100%;
+        margin: 12px 0;
         z-index: 9999;
       }
       #${TOOLBAR_ID}[${TOOLBAR_FLOAT_ATTR}="true"] {
