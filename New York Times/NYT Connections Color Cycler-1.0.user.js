@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.4
+// @version      1.5
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -30,6 +30,7 @@
   const pointerDownPhaseByKey = new Map(); // track phase at pointerdown time
 
   let reapplyQueued = false;
+  let toolbarDeselecting = false; // true while applyColorToSelectedCards deselects cards
 
   injectStyles();
   queueReapply();
@@ -65,7 +66,7 @@
     // Phase 0 (unselected) and phase 1 (selected) need native handling:
     // - Phase 0: NYT selects the card
     // - Phase 1: NYT deselects the card (then we apply yellow in click handler)
-    if (phase > 1 && !event.ctrlKey) {
+    if (phase > 1 && !event.ctrlKey && !toolbarDeselecting) {
       event.stopImmediatePropagation();
     }
   }
@@ -271,7 +272,7 @@
       return;
     }
 
-    if (state === 0 || isSelectedByGame(card)) {
+    if (state === 0) {
       card.classList.remove(CYCLE_CLASS);
       card.removeAttribute(CYCLE_ATTR);
       return;
@@ -401,10 +402,15 @@
       queueReapplyAfterDeselection(key);
     }
 
-    if (!clickDeselectAllButton()) {
-      for (const { card } of selectedCards) {
-        toggleCardSelectionOff(card);
+    toolbarDeselecting = true;
+    try {
+      if (!clickDeselectAllButton()) {
+        for (const { card } of selectedCards) {
+          toggleCardSelectionOff(card);
+        }
       }
+    } finally {
+      toolbarDeselecting = false;
     }
 
     queueReapply();
