@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.5
+// @version      1.6
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -22,8 +22,8 @@
   const MAX_CYCLE_PHASE = MAX_COLOR_STATE + 1; // 0=unselected,1=selected,2-5=colors
   const COLOR_BUTTONS = [
     { label: 'Yellow', state: 1, bg: '#f9df6d', text: '#1d1d1d' },
-    { label: 'Blue', state: 3, bg: '#b0c4ef', text: '#1d1d1d' },
     { label: 'Green', state: 2, bg: '#a0c35a', text: '#1d1d1d' },
+    { label: 'Blue', state: 3, bg: '#b0c4ef', text: '#1d1d1d' },
     { label: 'Purple', state: 4, bg: '#ba81c5', text: '#1d1d1d' }
   ];
   const customStateByCardKey = new Map();
