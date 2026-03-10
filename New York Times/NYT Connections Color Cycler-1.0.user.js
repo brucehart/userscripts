@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.6
+// @version      1.8
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -372,7 +372,10 @@
       }));
     }
 
-    toolbar.appendChild(createToolbarButton('Clear', '#ffffff', '#1d1d1d', clearAllCustomColors));
+    toolbar.appendChild(createToolbarButton('Clear', '#ffffff', '#1d1d1d', () => {
+      applyColorToSelectedCards(0);
+    }));
+    toolbar.appendChild(createToolbarButton('Clear All', '#ffffff', '#1d1d1d', clearAllCustomColors));
     return toolbar;
   }
 
@@ -520,11 +523,14 @@
       }
       #${TOOLBAR_ID} {
         display: flex;
+        flex: 0 0 100%;
         flex-wrap: wrap;
         gap: 8px;
         align-items: center;
         justify-content: center;
         width: 100%;
+        min-width: 100%;
+        box-sizing: border-box;
         margin: 12px 0;
         z-index: 9999;
       }
