@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.8
+// @version      1.9
 // @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
@@ -38,9 +38,10 @@
   window.addEventListener('click', onCardClick, true);
 
   const observer = new MutationObserver(() => {
-    queueReapply();
+    reapplyAllStates();  // Synchronously reapply colors immediately on DOM change
+    queueReapply();      // Also queue the full reapply (which includes ensureToolbar)
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'aria-pressed', 'aria-selected', 'aria-checked', 'data-state', 'aria-disabled', 'data-testid'] });
 
   function onPointerDown(event) {
     if (!event.isTrusted) {
