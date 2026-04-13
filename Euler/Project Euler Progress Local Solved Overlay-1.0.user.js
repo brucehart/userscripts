@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Project Euler Progress Local Solved Overlay
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.0
-// @description  Store extra solved Project Euler problems locally and render the progress page as if they are solved.
+// @version      1.1
+// @description  Store extra solved Project Euler problems in Tampermonkey storage and render the progress page as if they are solved.
 // @author       Bruce J. Hart
 // @match        https://projecteuler.net/progress*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
@@ -517,13 +518,19 @@
 
   function loadStoredProblems() {
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
+      const stored = GM_getValue(STORAGE_KEY, null);
+      if (Array.isArray(stored)) {
+        return stored;
+      }
+
+      const legacy = loadLegacyStoredProblems();
+      if (!Array.isArray(legacy) || legacy.length === 0) {
         return [];
       }
 
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      GM_setValue(STORAGE_KEY, legacy);
+      window.localStorage.removeItem(STORAGE_KEY);
+      return legacy;
     } catch (error) {
       return [];
     }
@@ -532,11 +539,21 @@
   function saveStoredProblems(problemIds) {
     const normalized = normalizeProblemIds(problemIds, latestSnapshot?.totalProblems || 0);
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+      GM_setValue(STORAGE_KEY, normalized);
     } catch (error) {
-      console.warn('Project Euler local solved overlay could not write local storage.', error);
+      console.warn('Project Euler local solved overlay could not write Tampermonkey storage.', error);
     }
     return normalized;
+  }
+
+  function loadLegacyStoredProblems() {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   }
 
   function normalizeProblemIds(problemIds, totalProblems) {
