@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Project Euler Progress Local Solved Overlay
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.2
+// @version      1.3
 // @description  Store extra solved Project Euler problems in Tampermonkey storage and render the progress page as if they are solved.
 // @author       Bruce J. Hart
 // @match        https://projecteuler.net/progress*
@@ -26,7 +26,7 @@
   const CLEAR_ID = 'tm-pe-local-solved-clear';
   const OVERLAY_ATTR = 'data-tm-pe-local-solved';
   const SUMMARY_PATTERN = /Solved\s+(\d+)\s+out of\s+(\d+)\s+problems\s+\(([\d.]+)%\)/i;
-  const SOLVED_PROBLEMS_GIST_URL = 'https://gist.githubusercontent.com/brucehart/0b68fb617553e81b2961c3c3e7688928/raw/5d5291114bc85239338b289eda22727c8f4f4de8/solved-problems.txt';
+  const SOLVED_PROBLEMS_GIST_URL = 'https://gist.githubusercontent.com/brucehart/0b68fb617553e81b2961c3c3e7688928/raw/solved-problems.txt';
 
   let observer = null;
   let applyQueued = false;
