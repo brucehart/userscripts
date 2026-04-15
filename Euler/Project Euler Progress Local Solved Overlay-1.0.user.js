@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Project Euler Progress Local Solved Overlay
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.1
+// @version      1.2
 // @description  Store extra solved Project Euler problems in Tampermonkey storage and render the progress page as if they are solved.
 // @author       Bruce J. Hart
 // @match        https://projecteuler.net/progress*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      gist.githubusercontent.com
 // ==/UserScript==
 
 (function () {
@@ -20,9 +22,11 @@
   const COUNT_ID = 'tm-pe-local-solved-count';
   const LIST_ID = 'tm-pe-local-solved-list';
   const SAVE_ID = 'tm-pe-local-solved-save';
+  const IMPORT_ID = 'tm-pe-local-solved-import';
   const CLEAR_ID = 'tm-pe-local-solved-clear';
   const OVERLAY_ATTR = 'data-tm-pe-local-solved';
   const SUMMARY_PATTERN = /Solved\s+(\d+)\s+out of\s+(\d+)\s+problems\s+\(([\d.]+)%\)/i;
+  const SOLVED_PROBLEMS_GIST_URL = 'https://gist.githubusercontent.com/brucehart/0b68fb617553e81b2961c3c3e7688928/raw/5d5291114bc85239338b289eda22727c8f4f4de8/solved-problems.txt';
 
   let observer = null;
   let applyQueued = false;
@@ -101,6 +105,11 @@
 
       .tm-pe-local-solved-actions button:hover {
         background: #e9d4a3;
+      }
+
+      .tm-pe-local-solved-actions button:disabled {
+        cursor: wait;
+        opacity: 0.7;
       }
 
       #${STATUS_ID} {
@@ -332,7 +341,7 @@
     heading.textContent = 'Local Solved Problems';
 
     const description = document.createElement('p');
-    description.textContent = 'Enter extra solved problem IDs separated by commas, spaces, or new lines.';
+    description.textContent = 'Enter extra solved problem IDs separated by commas, spaces, or new lines, or import the shared gist list.';
 
     const textarea = document.createElement('textarea');
     textarea.id = INPUT_ID;
@@ -351,6 +360,12 @@
     saveButton.textContent = 'Save Local Extras';
     saveButton.addEventListener('click', handleSave);
 
+    const importButton = document.createElement('button');
+    importButton.id = IMPORT_ID;
+    importButton.type = 'button';
+    importButton.textContent = 'Import Gist List';
+    importButton.addEventListener('click', handleImportFromGist);
+
     const clearButton = document.createElement('button');
     clearButton.id = CLEAR_ID;
     clearButton.type = 'button';
@@ -358,6 +373,7 @@
     clearButton.addEventListener('click', handleClear);
 
     actions.appendChild(saveButton);
+    actions.appendChild(importButton);
     actions.appendChild(clearButton);
 
     const status = document.createElement('div');
@@ -390,24 +406,53 @@
       return;
     }
 
+    saveEditorValue(input.value, 'Saved');
+  }
+
+  async function handleImportFromGist() {
+    const input = document.getElementById(INPUT_ID);
+    if (!input) {
+      return;
+    }
+
+    setImportButtonLoading(true);
+    setStatus('Loading solved problems from gist...');
+
+    try {
+      const raw = (await fetchRemoteText(SOLVED_PROBLEMS_GIST_URL)).trim();
+      input.value = raw;
+      input.dataset.dirty = 'true';
+      saveEditorValue(input.value, 'Imported');
+    } catch (error) {
+      console.warn('Project Euler local solved overlay could not load the gist problem list.', error);
+      setStatus(`Could not load the gist problem list: ${error.message}`);
+    } finally {
+      setImportButtonLoading(false);
+    }
+  }
+
+  function saveEditorValue(rawValue, actionLabel) {
     const snapshot = latestSnapshot || {
       siteSolved: new Set(),
       totalProblems: 0
     };
-    const parsed = parseInput(input.value, snapshot.totalProblems);
+    const parsed = parseInput(rawValue, snapshot.totalProblems);
     const alreadySolved = parsed.valid.filter((problemId) => snapshot.siteSolved.has(problemId));
     const localOnly = parsed.valid.filter((problemId) => !snapshot.siteSolved.has(problemId));
 
     saveStoredProblems(localOnly);
-    input.value = localOnly.join(', ');
-    input.dataset.dirty = 'false';
+    const input = document.getElementById(INPUT_ID);
+    if (input) {
+      input.value = localOnly.join(', ');
+      input.dataset.dirty = 'false';
+    }
     queueApply();
 
     const messageParts = [];
     if (localOnly.length === 0) {
-      messageParts.push('Saved an empty local list.');
+      messageParts.push(`${actionLabel} an empty local list.`);
     } else {
-      messageParts.push(`Saved ${localOnly.length} local problem${localOnly.length === 1 ? '' : 's'}.`);
+      messageParts.push(`${actionLabel} ${localOnly.length} local problem${localOnly.length === 1 ? '' : 's'}.`);
     }
 
     if (alreadySolved.length > 0) {
@@ -463,6 +508,16 @@
     if (status) {
       status.textContent = message;
     }
+  }
+
+  function setImportButtonLoading(isLoading) {
+    const button = document.getElementById(IMPORT_ID);
+    if (!button) {
+      return;
+    }
+
+    button.disabled = isLoading;
+    button.textContent = isLoading ? 'Importing...' : 'Import Gist List';
   }
 
   function parseInput(raw, totalProblems) {
@@ -588,5 +643,34 @@
     }
 
     return left.every((value, index) => value === right[index]);
+  }
+
+  function fetchRemoteText(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('GM_xmlhttpRequest is unavailable.'));
+        return;
+      }
+
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        timeout: 15000,
+        onload: (response) => {
+          if (response.status >= 200 && response.status < 300) {
+            resolve(response.responseText || '');
+            return;
+          }
+
+          reject(new Error(`Request failed with status ${response.status}.`));
+        },
+        onerror: () => {
+          reject(new Error('Network request failed.'));
+        },
+        ontimeout: () => {
+          reject(new Error('Request timed out.'));
+        }
+      });
+    });
   }
 })();
