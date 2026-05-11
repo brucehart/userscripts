@@ -2,12 +2,16 @@
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
 // @version      1.0
-// @description  Add a right-click menu item on Instagram images to open the real image URL in a new tab.
+// @description  Add right-click menu items on Instagram images to open, save, or copy the real image.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
 // @run-at       document-idle
 // @grant        GM_openInTab
+// @grant        GM_download
+// @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // ==/UserScript==
 
 (function () {
@@ -16,6 +20,7 @@
   const MENU_ID = 'tm-instagram-view-image-menu';
   const MAX_ANCESTOR_DEPTH = 8;
   let activeImageUrl = '';
+  let activeImageFilename = '';
   let menu = null;
 
   function normalizeUrl(rawUrl) {
@@ -62,6 +67,24 @@
 
   function imageUrlFromImg(img) {
     return parseSrcset(img.getAttribute('srcset')) || normalizeUrl(img.currentSrc) || normalizeUrl(img.src);
+  }
+
+  function filenameFromImageUrl(imageUrl) {
+    try {
+      const url = new URL(imageUrl);
+      const pathname = decodeURIComponent(url.pathname);
+      const rawName = pathname.split('/').filter(Boolean).pop() || '';
+      const extensionMatch = rawName.match(/\.(?:avif|gif|jpe?g|png|webp)\b/i);
+      const extension = extensionMatch ? extensionMatch[0].toLowerCase() : '.jpg';
+      const baseName = rawName
+        .replace(/\.(?:avif|gif|jpe?g|png|webp).*$/i, '')
+        .replace(/[^a-z0-9._-]+/gi, '-')
+        .replace(/^-+|-+$/g, '');
+
+      return `${baseName || 'instagram-image'}${extension}`;
+    } catch (e) {
+      return 'instagram-image.jpg';
+    }
   }
 
   function backgroundUrlFromElement(element) {
@@ -134,12 +157,16 @@
 
     menu = document.createElement('div');
     menu.id = MENU_ID;
-    menu.innerHTML = '<button type="button">View Image in New Tab</button>';
+    menu.innerHTML = `
+      <button type="button" data-action="open">View Image in New Tab</button>
+      <button type="button" data-action="save">Save Image</button>
+      <button type="button" data-action="copy">Copy Image</button>
+    `;
     menu.addEventListener('contextmenu', function (event) {
       event.preventDefault();
       event.stopPropagation();
     });
-    menu.querySelector('button').addEventListener('click', openActiveImage);
+    menu.addEventListener('click', handleMenuClick);
     document.body.appendChild(menu);
 
     const style = document.createElement('style');
@@ -184,6 +211,7 @@
 
   function showMenu(x, y, imageUrl) {
     activeImageUrl = imageUrl;
+    activeImageFilename = filenameFromImageUrl(imageUrl);
 
     const currentMenu = ensureMenu();
     currentMenu.style.display = 'block';
@@ -198,7 +226,21 @@
 
   function hideMenu() {
     activeImageUrl = '';
+    activeImageFilename = '';
     if (menu) menu.style.display = 'none';
+  }
+
+  function handleMenuClick(event) {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+
+    if (button.dataset.action === 'open') {
+      openActiveImage();
+    } else if (button.dataset.action === 'save') {
+      saveActiveImage();
+    } else if (button.dataset.action === 'copy') {
+      copyActiveImage();
+    }
   }
 
   function openActiveImage() {
@@ -212,6 +254,129 @@
     } else {
       window.open(imageUrl, '_blank', 'noopener');
     }
+  }
+
+  function saveActiveImage() {
+    const imageUrl = activeImageUrl;
+    const filename = activeImageFilename || 'instagram-image.jpg';
+    hideMenu();
+
+    if (!imageUrl) return;
+
+    if (typeof GM_download === 'function') {
+      GM_download({
+        url: imageUrl,
+        name: filename,
+        saveAs: true
+      });
+      return;
+    }
+
+    const link = document.createElement('a');
+    link.href = imageUrl;
+    link.download = filename;
+    link.rel = 'noopener';
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function getImageBlob(imageUrl) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise(function (resolve, reject) {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: imageUrl,
+          responseType: 'blob',
+          onload: function (response) {
+            if (response.status >= 200 && response.status < 300 && response.response) {
+              resolve(response.response);
+            } else {
+              reject(new Error(`Image request failed with status ${response.status}`));
+            }
+          },
+          onerror: function () {
+            reject(new Error('Image request failed'));
+          }
+        });
+      });
+    }
+
+    return fetch(imageUrl, { credentials: 'omit' }).then(function (response) {
+      if (!response.ok) throw new Error(`Image request failed with status ${response.status}`);
+      return response.blob();
+    });
+  }
+
+  function imageBlobToPngBlob(blob) {
+    return new Promise(function (resolve, reject) {
+      const objectUrl = URL.createObjectURL(blob);
+      const image = new Image();
+
+      image.onload = function () {
+        URL.revokeObjectURL(objectUrl);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0);
+        canvas.toBlob(function (pngBlob) {
+          if (pngBlob) {
+            resolve(pngBlob);
+          } else {
+            reject(new Error('Could not convert image for clipboard'));
+          }
+        }, 'image/png');
+      };
+
+      image.onerror = function () {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error('Could not load image for clipboard'));
+      };
+
+      image.src = objectUrl;
+    });
+  }
+
+  function copyTextToClipboard(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(text);
+    }
+
+    return Promise.reject(new Error('Clipboard text API is not available'));
+  }
+
+  function copyActiveImage() {
+    const imageUrl = activeImageUrl;
+    hideMenu();
+
+    if (!imageUrl) return;
+
+    if (!navigator.clipboard || typeof navigator.clipboard.write !== 'function' || typeof ClipboardItem !== 'function') {
+      copyTextToClipboard(imageUrl);
+      return;
+    }
+
+    getImageBlob(imageUrl)
+      .then(imageBlobToPngBlob)
+      .then(function (pngBlob) {
+        return navigator.clipboard.write([
+          new ClipboardItem({
+            'image/png': pngBlob
+          })
+        ]);
+      })
+      .catch(function () {
+        copyTextToClipboard(imageUrl);
+      });
   }
 
   document.addEventListener('contextmenu', function (event) {
