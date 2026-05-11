@@ -342,16 +342,26 @@
   }
 
   function copyTextToClipboard(text) {
-    if (typeof GM_setClipboard === 'function') {
-      GM_setClipboard(text, 'text');
-      return Promise.resolve();
-    }
+    return Promise.resolve().then(function () {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return;
+      }
 
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      return navigator.clipboard.writeText(text);
-    }
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return navigator.clipboard.writeText(text);
+      }
 
-    return Promise.reject(new Error('Clipboard text API is not available'));
+      throw new Error('Clipboard text API is not available');
+    });
+  }
+
+  function handleCopyTextFailure(error) {
+    console.warn('Instagram View Image in New Tab: could not copy image URL fallback.', error);
+  }
+
+  function copyImageUrlFallback(imageUrl) {
+    return copyTextToClipboard(imageUrl).catch(handleCopyTextFailure);
   }
 
   function copyActiveImage() {
@@ -361,7 +371,7 @@
     if (!imageUrl) return;
 
     if (!navigator.clipboard || typeof navigator.clipboard.write !== 'function' || typeof ClipboardItem !== 'function') {
-      copyTextToClipboard(imageUrl);
+      copyImageUrlFallback(imageUrl);
       return;
     }
 
@@ -375,7 +385,7 @@
         ]);
       })
       .catch(function () {
-        copyTextToClipboard(imageUrl);
+        copyImageUrlFallback(imageUrl);
       });
   }
 
