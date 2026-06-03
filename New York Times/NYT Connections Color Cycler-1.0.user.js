@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NYT Connections Color Cycler
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.10
-// @description  Cycle Connections words through native selected and hint colors, with bulk color action buttons.
+// @version      1.11
+// @description  Cycle Connections words through native selected and single/multi-color hint backgrounds.
 // @author       Bruce J. Hart
 // @match        https://www.nytimes.com/games/connections*
 // @match        https://www.nytimes.com/crosswords/game/connections*
@@ -18,15 +18,15 @@
   const CYCLE_ATTR = 'data-tm-connections-cycle';
   const TOOLBAR_ID = 'tm-nyt-connections-toolbar';
   const TOOLBAR_FLOAT_ATTR = 'data-tm-floating';
-  const MAX_COLOR_STATE = 4; // 1-4 = yellow/green/blue/purple, 0 = none
-  const MAX_CYCLE_PHASE = MAX_COLOR_STATE + 1; // 0=unselected,1=selected,2-5=colors
   const COLOR_BUTTONS = [
-    { label: 'Yellow', state: 1, bg: '#f9df6d', text: '#1d1d1d' },
-    { label: 'Green', state: 2, bg: '#a0c35a', text: '#1d1d1d' },
-    { label: 'Blue', state: 3, bg: '#b0c4ef', text: '#1d1d1d' },
-    { label: 'Purple', state: 4, bg: '#ba81c5', text: '#1d1d1d' }
+    { label: 'Yellow', state: 1, mask: 1, bg: '#f9df6d', text: '#1d1d1d' },
+    { label: 'Green', state: 2, mask: 2, bg: '#a0c35a', text: '#1d1d1d' },
+    { label: 'Blue', state: 3, mask: 4, bg: '#b0c4ef', text: '#1d1d1d' },
+    { label: 'Purple', state: 4, mask: 8, bg: '#ba81c5', text: '#1d1d1d' }
   ];
-  const customStateByCardKey = new Map();
+  const ALL_COLOR_MASK = COLOR_BUTTONS.reduce((mask, config) => mask | config.mask, 0);
+  const STRIPE_WIDTH_PX = 12;
+  const customColorMaskByCardKey = new Map();
   const pointerDownPhaseByKey = new Map(); // track phase at pointerdown time
 
   let reapplyQueued = false;
@@ -167,7 +167,6 @@
 
     if (ctrlPressed) {
       if (currentPhase === 1) {
-        setCustomState(key, 0);
         if (!liveSelected) {
           // The card was already deselected earlier in the event chain.
           // Stop the click from re-selecting it.
@@ -179,23 +178,21 @@
         return;
       }
 
-      // For phase 0 and custom color phases, clear custom colors and let native
-      // selection logic run so Ctrl toggles selected/unselected only.
-      setCustomState(key, 0);
+      // Let Ctrl toggle selected/unselected only, preserving any custom colors.
       queueReapply();
       return;
     }
 
     if (currentPhase === 0) {
       // First click should be the site's native selected behavior.
-      setCustomState(key, 0);
+      setCustomColorMask(key, 0);
       return;
     }
 
     if (currentPhase === 1) {
       // The site may deselect on pointerdown or click depending on the target.
       // Only block the click if the card is already deselected.
-      setCustomState(key, 1);
+      addColorToCustomState(key, 1);
       if (!liveSelected) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -207,8 +204,7 @@
 
     event.preventDefault();
     event.stopImmediatePropagation();
-    const nextPhase = currentPhase >= MAX_CYCLE_PHASE ? 0 : currentPhase + 1;
-    applyPhase(key, nextPhase);
+    applyNextCustomColor(key);
   }
 
   function getCardFromTarget(target) {
@@ -267,11 +263,12 @@
     return text.replace(/\s+/g, ' ').trim().toUpperCase();
   }
 
-  function setCustomState(key, state) {
-    if (state === 0) {
-      customStateByCardKey.delete(key);
+  function setCustomColorMask(key, mask) {
+    const normalizedMask = normalizeColorMask(mask);
+    if (normalizedMask === 0) {
+      customColorMaskByCardKey.delete(key);
     } else {
-      customStateByCardKey.set(key, state);
+      customColorMaskByCardKey.set(key, normalizedMask);
     }
   }
 
@@ -280,23 +277,70 @@
       return 1;
     }
 
-    const customState = customStateByCardKey.get(key) || 0;
-    if (customState > 0) {
-      return customState + 1;
-    }
-
-    return 0;
+    return getCustomColorMask(key) > 0 ? 2 : 0;
   }
 
-  function applyPhase(key, phase) {
-    if (phase === 0 || phase === 1) {
-      setCustomState(key, 0);
+  function getCustomColorMask(key) {
+    return normalizeColorMask(customColorMaskByCardKey.get(key) || 0);
+  }
+
+  function normalizeColorMask(mask) {
+    return Number(mask) & ALL_COLOR_MASK;
+  }
+
+  function addColorToCustomState(key, state) {
+    const config = getColorConfigByState(state);
+    if (!config) {
+      return;
+    }
+
+    setCustomColorMask(key, getCustomColorMask(key) | config.mask);
+    queueReapply();
+  }
+
+  function applyNextCustomColor(key) {
+    const currentMask = getCustomColorMask(key);
+    if (currentMask === ALL_COLOR_MASK) {
+      setCustomColorMask(key, 0);
       queueReapply();
       return;
     }
 
-    setCustomState(key, phase - 1);
+    const nextColor = COLOR_BUTTONS.find(config => (currentMask & config.mask) === 0);
+    if (nextColor) {
+      setCustomColorMask(key, currentMask | nextColor.mask);
+    }
     queueReapply();
+  }
+
+  function getColorConfigByState(state) {
+    return COLOR_BUTTONS.find(config => config.state === state) || null;
+  }
+
+  function getColorConfigsForMask(mask) {
+    const normalizedMask = normalizeColorMask(mask);
+    return COLOR_BUTTONS.filter(config => (normalizedMask & config.mask) !== 0);
+  }
+
+  function getCardBackground(mask) {
+    const colors = getColorConfigsForMask(mask);
+    if (colors.length === 0) {
+      return '';
+    }
+
+    if (colors.length === 1) {
+      return colors[0].bg;
+    }
+
+    let position = 0;
+    const stops = [];
+    for (const color of colors) {
+      const nextPosition = position + STRIPE_WIDTH_PX;
+      stops.push(`${color.bg} ${position}px`, `${color.bg} ${nextPosition}px`);
+      position = nextPosition;
+    }
+
+    return `repeating-linear-gradient(45deg, ${stops.join(', ')})`;
   }
 
   function queueReapplyAfterDeselection(key, attempt = 0) {
@@ -337,24 +381,34 @@
     const cards = document.querySelectorAll(CARD_SELECTOR);
     for (const card of cards) {
       const key = getCardKey(card);
-      const state = key ? (customStateByCardKey.get(key) || 0) : 0;
-      applyStateToCard(card, state);
+      const colorMask = key ? getCustomColorMask(key) : 0;
+      applyStateToCard(card, colorMask);
     }
   }
 
-  function applyStateToCard(card, state) {
+  function applyStateToCard(card, colorMask) {
     if (!card) {
       return;
     }
 
-    if (state === 0) {
+    const normalizedMask = normalizeColorMask(colorMask);
+    if (normalizedMask === 0) {
       card.classList.remove(CYCLE_CLASS);
       card.removeAttribute(CYCLE_ATTR);
+      card.style.removeProperty('--tm-cycle-bg');
+      return;
+    }
+
+    if (isSelectedByGame(card)) {
+      card.classList.remove(CYCLE_CLASS);
+      card.removeAttribute(CYCLE_ATTR);
+      card.style.removeProperty('--tm-cycle-bg');
       return;
     }
 
     card.classList.add(CYCLE_CLASS);
-    card.setAttribute(CYCLE_ATTR, String(state));
+    card.setAttribute(CYCLE_ATTR, String(normalizedMask));
+    card.style.setProperty('--tm-cycle-bg', getCardBackground(normalizedMask));
   }
 
   function isDisabled(card) {
@@ -506,8 +560,13 @@
       return;
     }
 
+    const colorConfig = state === 0 ? null : getColorConfigByState(state);
     for (const { card, key } of selectedCards) {
-      setCustomState(key, state);
+      if (colorConfig) {
+        setCustomColorMask(key, getCustomColorMask(key) | colorConfig.mask);
+      } else if (state === 0) {
+        setCustomColorMask(key, 0);
+      }
       queueReapplyAfterDeselection(key);
     }
 
@@ -599,11 +658,11 @@
   }
 
   function clearAllCustomColors() {
-    if (customStateByCardKey.size === 0) {
+    if (customColorMaskByCardKey.size === 0) {
       return;
     }
 
-    customStateByCardKey.clear();
+    customColorMaskByCardKey.clear();
     queueReapply();
   }
 
@@ -612,20 +671,9 @@
     style.textContent = `
       .${CYCLE_CLASS}:not([class*="Card-module_selected"]) {
         color: #1d1d1d !important;
+        background: var(--tm-cycle-bg) !important;
         border-color: rgba(0, 0, 0, 0.35) !important;
         box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.22) !important;
-      }
-      .${CYCLE_CLASS}[${CYCLE_ATTR}="1"]:not([class*="Card-module_selected"]) {
-        background-color: #f9df6d !important;
-      }
-      .${CYCLE_CLASS}[${CYCLE_ATTR}="2"]:not([class*="Card-module_selected"]) {
-        background-color: #a0c35a !important;
-      }
-      .${CYCLE_CLASS}[${CYCLE_ATTR}="3"]:not([class*="Card-module_selected"]) {
-        background-color: #b0c4ef !important;
-      }
-      .${CYCLE_CLASS}[${CYCLE_ATTR}="4"]:not([class*="Card-module_selected"]) {
-        background-color: #ba81c5 !important;
       }
       #${TOOLBAR_ID} {
         display: flex;
