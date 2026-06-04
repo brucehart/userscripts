@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.8
+// @version      1.9
 // @description  Add right-click menu items on Instagram images and videos to open, save, or copy the real media.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
 // @run-at       document-idle
 // @require      https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js
+// @require      https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js
 // @grant        GM_openInTab
 // @grant        GM_download
 // @grant        GM_setClipboard
@@ -35,6 +36,7 @@
   let ffmpegInstance = null;
   let ffmpegLoadPromise = null;
   let muxQueue = Promise.resolve();
+  let lastFfmpegLogMessage = '';
 
   function normalizeUrl(rawUrl) {
     if (!rawUrl) return '';
@@ -145,7 +147,37 @@
     }
   }
 
+  function decodeBase64Text(rawValue) {
+    if (!rawValue) return '';
+    try {
+      const base64 = rawValue.replace(/-/g, '+').replace(/_/g, '/');
+      const paddedBase64 = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+      return atob(paddedBase64);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function mediaAssetId(url) {
+    const normalizedUrl = normalizeAbsoluteUrl(url) || normalizeUrl(url);
+    if (!normalizedUrl) return '';
+
+    try {
+      const parsed = new URL(normalizedUrl);
+      const encodedMetadata = parsed.searchParams.get('efg');
+      const metadataText = decodeBase64Text(encodedMetadata);
+      const match = metadataText.match(/"(?:xpv_asset_id|asset_id|video_id)"\s*:\s*(?:"([^"]+)"|([0-9]+))/);
+      return match ? match[1] || match[2] || '' : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
   function sameMediaUrl(leftUrl, rightUrl) {
+    const leftAssetId = mediaAssetId(leftUrl);
+    const rightAssetId = mediaAssetId(rightUrl);
+    if (leftAssetId && rightAssetId) return leftAssetId === rightAssetId;
+
     const leftFingerprint = mediaUrlFingerprint(leftUrl);
     const rightFingerprint = mediaUrlFingerprint(rightUrl);
     return Boolean(leftFingerprint && rightFingerprint && leftFingerprint === rightFingerprint);
@@ -600,7 +632,7 @@
       }
     }
 
-    return selectVideoDetails(candidates, preferredVideoUrl, false);
+    return selectVideoDetails(candidates, preferredVideoUrl, Boolean(preferredVideoUrl));
   }
 
   function videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch) {
@@ -1134,6 +1166,9 @@
           showStatus('Merging video and audio...', percent);
         }
       });
+      ffmpegInstance.setLogger(function (event) {
+        if (event && event.message) lastFfmpegLogMessage = event.message;
+      });
     }
 
     if (ffmpegInstance.isLoaded()) return Promise.resolve(ffmpegInstance);
@@ -1198,6 +1233,7 @@
       return Promise.reject(new Error('Missing separate video or audio stream'));
     }
 
+    lastFfmpegLogMessage = '';
     const id = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
     const videoInput = `instagram-video-${id}.mp4`;
     const audioInput = `instagram-audio-${id}.m4a`;
@@ -1228,7 +1264,6 @@
           '-map', '1:a:0',
           '-c', 'copy',
           '-shortest',
-          '-movflags', '+faststart',
           output
         ).then(function () {
           const mergedBytes = ffmpeg.FS('readFile', output);
@@ -1255,12 +1290,15 @@
     console.warn('Instagram View Image in New Tab: could not merge video and audio.', error);
     hideStatus();
 
+    const detail = lastFfmpegLogMessage || (error && error.message) || String(error || '');
+    const detailSuffix = detail ? `\n\nLast merge error: ${detail}` : '';
+
     if (media && media.videoUrl) {
-      window.alert('Found separate Instagram video and audio streams, but could not merge them in this browser. Falling back to the video-only stream.');
+      window.alert(`Found separate Instagram video and audio streams, but could not merge them in this browser. Falling back to the video-only stream.${detailSuffix}`);
       return media.videoUrl;
     }
 
-    window.alert('Found separate Instagram video and audio streams, but could not merge them in this browser.');
+    window.alert(`Found separate Instagram video and audio streams, but could not merge them in this browser.${detailSuffix}`);
     return '';
   }
 
