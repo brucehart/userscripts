@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.6
+// @version      1.7
 // @description  Add right-click menu items on Instagram images and videos to open, save, or copy the real media.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
@@ -341,6 +341,26 @@
     return textarea.value;
   }
 
+  function escapeBareXmlAmpersands(text) {
+    return text.replace(/&(?!#\d+;|#x[0-9a-f]+;|[a-z][a-z0-9_.:-]*;)/gi, '&amp;');
+  }
+
+  function dashManifestTextCandidates(rawValue) {
+    const candidates = [];
+    const seen = new Set();
+
+    function add(value) {
+      if (typeof value !== 'string' || seen.has(value)) return;
+      seen.add(value);
+      candidates.push(value);
+    }
+
+    add(rawValue);
+    add(decodeHtmlEntities(rawValue));
+
+    return candidates;
+  }
+
   function decodeJsonString(rawValue) {
     try {
       return JSON.parse(`"${rawValue}"`);
@@ -406,14 +426,17 @@
 
   function videoDetailsFromDashManifest(rawValue) {
     for (const candidate of expandPossibleVideoStrings(rawValue)) {
-      const manifestText = decodeHtmlEntities(candidate);
-      if (!/<BaseURL\b/i.test(manifestText)) continue;
+      for (const manifestText of dashManifestTextCandidates(candidate)) {
+        if (!/<BaseURL\b/i.test(manifestText)) continue;
 
-      const doc = new DOMParser().parseFromString(manifestText, 'application/xml');
-      const details = bestDashBaseUrlsFromDocument(doc);
-      if (hasVideoDetails(details)) return details;
+        const safeManifestText = escapeBareXmlAmpersands(manifestText);
+        const doc = new DOMParser().parseFromString(safeManifestText, 'application/xml');
+        const details = bestDashBaseUrlsFromDocument(doc);
+        if (hasVideoDetails(details)) return details;
+      }
 
-      const baseUrlMatch = manifestText.match(/<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i);
+      const fallbackText = decodeHtmlEntities(candidate);
+      const baseUrlMatch = fallbackText.match(/<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i);
       if (!baseUrlMatch) continue;
 
       const url = normalizeAbsoluteUrl(baseUrlMatch[1]);
@@ -469,17 +492,22 @@
     state.visited.add(value);
 
     if (Array.isArray(value)) {
+      let fallbackDetails = createVideoDetails('', '');
       for (const item of value) {
         const details = findVideoDetailsInValue(item, state, depth + 1);
-        if (hasVideoDetails(details)) return details;
+        if (hasSeparateAudio(details)) return details;
+        if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
+          fallbackDetails = details;
+        }
       }
-      return createVideoDetails('', '');
+      return fallbackDetails;
     }
 
     const keys = Object.keys(value).sort(function (left, right) {
       const priorityDelta = keySearchPriority(left) - keySearchPriority(right);
       return priorityDelta || 0;
     });
+    let fallbackDetails = createVideoDetails('', '');
 
     for (const key of keys) {
       let nestedValue;
@@ -498,10 +526,13 @@
       }
 
       const details = findVideoDetailsInValue(nestedValue, state, depth + 1);
-      if (hasVideoDetails(details)) return details;
+      if (hasSeparateAudio(details)) return details;
+      if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
+        fallbackDetails = details;
+      }
     }
 
-    return createVideoDetails('', '');
+    return fallbackDetails;
   }
 
   function findVideoDetailsInElementData(element) {
