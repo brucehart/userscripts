@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.7
+// @version      1.8
 // @description  Add right-click menu items on Instagram images and videos to open, save, or copy the real media.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
@@ -26,9 +26,9 @@
   const INSTAGRAM_MEDIA_LINK_SELECTOR = 'a[href^="/p/"], a[href^="/reel/"], a[href^="/reels/"], a[href^="/tv/"]';
   const DASH_MANIFEST_KEY_PATTERN = /dash_manifest/i;
   const VIDEO_URL_KEY_PATTERN = /^(?:video_url|playable_url|playable_url_quality_hd|dash_manifest|video_dash_manifest|contentUrl|src|url)$/i;
-  const MAX_OBJECT_SEARCH_DEPTH = 8;
-  const MAX_OBJECT_SEARCH_NODES = 2500;
-  const FFMPEG_CORE_URL = 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js';
+  const MAX_OBJECT_SEARCH_DEPTH = 12;
+  const MAX_OBJECT_SEARCH_NODES = 8000;
+  const FFMPEG_CORE_URL = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
   let activeMedia = null;
   let menu = null;
   let statusBox = null;
@@ -129,6 +129,50 @@
 
   function videoDetailsFromUrl(url) {
     return createVideoDetails(url, '');
+  }
+
+  function mediaUrlFingerprint(url) {
+    const normalizedUrl = normalizeAbsoluteUrl(url) || normalizeUrl(url);
+    if (!normalizedUrl) return '';
+
+    try {
+      const parsed = new URL(normalizedUrl);
+      return decodeURIComponent(parsed.pathname)
+        .toLowerCase()
+        .replace(/\/+$/g, '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function sameMediaUrl(leftUrl, rightUrl) {
+    const leftFingerprint = mediaUrlFingerprint(leftUrl);
+    const rightFingerprint = mediaUrlFingerprint(rightUrl);
+    return Boolean(leftFingerprint && rightFingerprint && leftFingerprint === rightFingerprint);
+  }
+
+  function selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch) {
+    const seen = new Set();
+    const uniqueCandidates = candidates.filter(function (details) {
+      if (!hasVideoDetails(details)) return false;
+
+      const key = `${details.videoUrl}\n${details.audioUrl || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    if (preferredVideoUrl) {
+      const matchingCandidates = uniqueCandidates.filter(function (details) {
+        return sameMediaUrl(details.videoUrl, preferredVideoUrl);
+      });
+      const matchingSeparateAudio = matchingCandidates.find(hasSeparateAudio);
+      if (matchingSeparateAudio) return matchingSeparateAudio;
+      if (matchingCandidates[0]) return matchingCandidates[0];
+      if (requirePreferredMatch) return createVideoDetails('', '');
+    }
+
+    return uniqueCandidates.find(hasSeparateAudio) || uniqueCandidates[0] || createVideoDetails('', '');
   }
 
   function keySearchPriority(key) {
@@ -479,35 +523,31 @@
     return '';
   }
 
-  function findVideoDetailsInValue(value, state, depth) {
-    if (!value || state.nodes > MAX_OBJECT_SEARCH_NODES || depth > MAX_OBJECT_SEARCH_DEPTH) {
-      return createVideoDetails('', '');
-    }
+  function collectVideoDetailsInValue(value, state, depth, candidates) {
+    if (!value || state.nodes > MAX_OBJECT_SEARCH_NODES || depth > MAX_OBJECT_SEARCH_DEPTH) return;
     state.nodes += 1;
 
-    if (typeof value === 'string') return normalizePotentialVideoDetails(value);
-    if (typeof value !== 'object' && typeof value !== 'function') return createVideoDetails('', '');
-    if (state.visited.has(value)) return createVideoDetails('', '');
+    if (typeof value === 'string') {
+      const details = normalizePotentialVideoDetails(value);
+      if (hasVideoDetails(details)) candidates.push(details);
+      return;
+    }
+    if (typeof value !== 'object' && typeof value !== 'function') return;
+    if (state.visited.has(value)) return;
 
     state.visited.add(value);
 
     if (Array.isArray(value)) {
-      let fallbackDetails = createVideoDetails('', '');
       for (const item of value) {
-        const details = findVideoDetailsInValue(item, state, depth + 1);
-        if (hasSeparateAudio(details)) return details;
-        if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
-          fallbackDetails = details;
-        }
+        collectVideoDetailsInValue(item, state, depth + 1, candidates);
       }
-      return fallbackDetails;
+      return;
     }
 
     const keys = Object.keys(value).sort(function (left, right) {
       const priorityDelta = keySearchPriority(left) - keySearchPriority(right);
       return priorityDelta || 0;
     });
-    let fallbackDetails = createVideoDetails('', '');
 
     for (const key of keys) {
       let nestedValue;
@@ -525,40 +565,16 @@
         continue;
       }
 
-      const details = findVideoDetailsInValue(nestedValue, state, depth + 1);
-      if (hasSeparateAudio(details)) return details;
-      if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
-        fallbackDetails = details;
-      }
+      collectVideoDetailsInValue(nestedValue, state, depth + 1, candidates);
     }
-
-    return fallbackDetails;
   }
 
-  function findVideoDetailsInElementData(element) {
+  function videoDetailsFromAttachedPageData(startElement, preferredVideoUrl) {
     const state = {
       visited: new WeakSet(),
       nodes: 0
     };
-
-    for (const key of Object.keys(element)) {
-      if (!/react|fiber|props|inst|internal/i.test(key)) continue;
-
-      let value;
-      try {
-        value = element[key];
-      } catch (e) {
-        continue;
-      }
-
-      const details = findVideoDetailsInValue(value, state, 0);
-      if (hasVideoDetails(details)) return details;
-    }
-
-    return createVideoDetails('', '');
-  }
-
-  function videoDetailsFromAttachedPageData(startElement) {
+    const candidates = [];
     const elements = [];
     let element = startElement;
     let depth = 0;
@@ -570,28 +586,39 @@
     }
 
     for (const candidate of elements) {
-      const details = findVideoDetailsInElementData(candidate);
-      if (hasVideoDetails(details)) return details;
+      for (const key of Object.keys(candidate)) {
+        if (!/react|fiber|props|inst|internal/i.test(key)) continue;
+
+        let value;
+        try {
+          value = candidate[key];
+        } catch (e) {
+          continue;
+        }
+
+        collectVideoDetailsInValue(value, state, 0, candidates);
+      }
     }
 
-    return createVideoDetails('', '');
+    return selectVideoDetails(candidates, preferredVideoUrl, false);
   }
 
-  function videoDetailsFromPerformanceEntries() {
+  function videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch) {
     if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
       return createVideoDetails('', '');
     }
 
     const entries = window.performance.getEntriesByType('resource').slice().reverse();
+    const candidates = [];
     for (const entry of entries) {
       const url = normalizePotentialVideoUrl(entry.name);
-      if (url) return videoDetailsFromUrl(url);
+      if (url) candidates.push(videoDetailsFromUrl(url));
     }
 
-    return createVideoDetails('', '');
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function videoDetailsFromPageGlobals() {
+  function videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch) {
     const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
     const globalNames = [
       '_sharedData',
@@ -604,6 +631,7 @@
       visited: new WeakSet(),
       nodes: 0
     };
+    const candidates = [];
 
     for (const name of globalNames) {
       let value;
@@ -613,25 +641,25 @@
         continue;
       }
 
-      const details = findVideoDetailsInValue(value, state, 0);
-      if (hasVideoDetails(details)) return details;
+      collectVideoDetailsInValue(value, state, 0, candidates);
     }
 
-    return createVideoDetails('', '');
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function videoDetailsFromDocumentScripts() {
+  function videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch) {
     const scripts = [...document.scripts].slice().reverse();
+    const candidates = [];
     for (const script of scripts) {
-      const details = extractVideoDetailsFromHtml(script.textContent || '');
-      if (hasVideoDetails(details)) return details;
+      candidates.push(...extractVideoDetailsCandidatesFromHtml(script.textContent || ''));
     }
 
-    return createVideoDetails('', '');
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function extractVideoDetailsFromHtml(html) {
+  function extractVideoDetailsCandidatesFromHtml(html) {
     const decodedHtml = decodeHtmlEntities(html);
+    const candidates = [];
     const patterns = [
       /"dash_manifest"\s*:\s*"((?:\\.|[^"\\])+)"/,
       /"video_dash_manifest"\s*:\s*"((?:\\.|[^"\\])+)"/,
@@ -646,7 +674,7 @@
       if (!match) continue;
 
       const details = normalizePotentialVideoDetails(decodeJsonString(match[1]));
-      if (hasVideoDetails(details)) return details;
+      if (hasVideoDetails(details)) candidates.push(details);
     }
 
     const doc = new DOMParser().parseFromString(decodedHtml, 'text/html');
@@ -657,9 +685,17 @@
       'meta[name="twitter:player:stream"]'
     ].join(','));
     const metaUrl = metaVideo ? normalizePotentialVideoUrl(metaVideo.getAttribute('content')) : '';
-    if (metaUrl) return videoDetailsFromUrl(metaUrl);
+    if (metaUrl) candidates.push(videoDetailsFromUrl(metaUrl));
 
-    return createVideoDetails('', '');
+    return candidates;
+  }
+
+  function extractVideoDetailsFromHtml(html, preferredVideoUrl, requirePreferredMatch) {
+    return selectVideoDetails(
+      extractVideoDetailsCandidatesFromHtml(html),
+      preferredVideoUrl,
+      requirePreferredMatch
+    );
   }
 
   function getText(url) {
@@ -709,6 +745,9 @@
     if (!media) return Promise.resolve(null);
     if (media.needsMuxing && media.videoUrl && media.audioUrl) return Promise.resolve(media);
 
+    const preferredDetails = directVideoDetailsFromMedia(media);
+    const preferredVideoUrl = preferredDetails.videoUrl || '';
+    const requirePreferredMatch = Boolean(preferredVideoUrl);
     let fallbackDetails = createVideoDetails('', '');
     function rememberFallback(details) {
       if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
@@ -718,36 +757,33 @@
     }
 
     if (media.videoElement) {
-      const attachedDetails = videoDetailsFromAttachedPageData(media.videoElement);
+      const attachedDetails = videoDetailsFromAttachedPageData(media.videoElement, preferredVideoUrl);
       if (rememberFallback(attachedDetails)) {
         return Promise.resolve(applyVideoDetailsToMedia(media, attachedDetails));
       }
-    }
-
-    const globalDetails = videoDetailsFromPageGlobals();
-    if (rememberFallback(globalDetails)) {
-      return Promise.resolve(applyVideoDetailsToMedia(media, globalDetails));
-    }
-
-    const scriptDetails = videoDetailsFromDocumentScripts();
-    if (rememberFallback(scriptDetails)) {
-      return Promise.resolve(applyVideoDetailsToMedia(media, scriptDetails));
     }
 
     if (media.pageUrl) {
       if (media.resolvedMediaPromise) return media.resolvedMediaPromise;
 
       media.resolvedMediaPromise = getText(media.pageUrl)
-        .then(extractVideoDetailsFromHtml)
+        .then(function (html) {
+          return extractVideoDetailsFromHtml(html, preferredVideoUrl, requirePreferredMatch);
+        })
         .then(function (details) {
           if (hasVideoDetails(details)) return applyVideoDetailsToMedia(media, details);
 
           if (hasVideoDetails(fallbackDetails)) return applyVideoDetailsToMedia(media, fallbackDetails);
 
-          const directDetails = directVideoDetailsFromMedia(media);
-          if (hasVideoDetails(directDetails)) return applyVideoDetailsToMedia(media, directDetails);
+          if (hasVideoDetails(preferredDetails)) return applyVideoDetailsToMedia(media, preferredDetails);
 
-          const performanceDetails = videoDetailsFromPerformanceEntries();
+          const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(scriptDetails)) return applyVideoDetailsToMedia(media, scriptDetails);
+
+          const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(globalDetails)) return applyVideoDetailsToMedia(media, globalDetails);
+
+          const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
           if (hasVideoDetails(performanceDetails)) return applyVideoDetailsToMedia(media, performanceDetails);
 
           return media;
@@ -757,10 +793,15 @@
 
           if (hasVideoDetails(fallbackDetails)) return applyVideoDetailsToMedia(media, fallbackDetails);
 
-          const directDetails = directVideoDetailsFromMedia(media);
-          if (hasVideoDetails(directDetails)) return applyVideoDetailsToMedia(media, directDetails);
+          if (hasVideoDetails(preferredDetails)) return applyVideoDetailsToMedia(media, preferredDetails);
 
-          const performanceDetails = videoDetailsFromPerformanceEntries();
+          const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(scriptDetails)) return applyVideoDetailsToMedia(media, scriptDetails);
+
+          const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(globalDetails)) return applyVideoDetailsToMedia(media, globalDetails);
+
+          const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
           if (hasVideoDetails(performanceDetails)) return applyVideoDetailsToMedia(media, performanceDetails);
 
           return media;
@@ -773,12 +814,21 @@
       return Promise.resolve(applyVideoDetailsToMedia(media, fallbackDetails));
     }
 
-    const directDetails = directVideoDetailsFromMedia(media);
-    if (hasVideoDetails(directDetails)) {
-      return Promise.resolve(applyVideoDetailsToMedia(media, directDetails));
+    if (hasVideoDetails(preferredDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, preferredDetails));
     }
 
-    const performanceDetails = videoDetailsFromPerformanceEntries();
+    const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+    if (hasVideoDetails(scriptDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, scriptDetails));
+    }
+
+    const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+    if (hasVideoDetails(globalDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, globalDetails));
+    }
+
+    const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
     if (hasVideoDetails(performanceDetails)) {
       return Promise.resolve(applyVideoDetailsToMedia(media, performanceDetails));
     }
