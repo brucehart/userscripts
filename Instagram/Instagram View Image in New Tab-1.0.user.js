@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.9
+// @version      1.10
 // @description  Add right-click menu items on Instagram images and videos to open, save, or copy the real media.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
@@ -1132,6 +1132,104 @@
     }
   }
 
+  function escapeHtml(text) {
+    return String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function openSeparateStreamsInTab(media) {
+    const pageData = JSON.stringify({
+      title: media.filename || 'Instagram video',
+      videoUrl: media.videoUrl,
+      audioUrl: media.audioUrl
+    }).replace(/</g, '\\u003c');
+    const title = escapeHtml(media.filename || 'Instagram video');
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>
+  html, body { margin: 0; min-height: 100%; background: #111; color: #f5f5f5; font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: 1fr auto; }
+  main { min-height: 0; display: grid; place-items: center; }
+  video { display: block; max-width: 100vw; max-height: calc(100vh - 44px); background: #000; }
+  footer { min-height: 44px; box-sizing: border-box; padding: 10px 14px; color: rgba(255,255,255,.72); }
+</style>
+</head>
+<body>
+<main><video id="video" controls autoplay playsinline></video></main>
+<audio id="audio" preload="auto"></audio>
+<footer id="message">Audio is synced from Instagram's separate audio stream.</footer>
+<script>
+  const media = ${pageData};
+  const video = document.getElementById('video');
+  const audio = document.getElementById('audio');
+  const message = document.getElementById('message');
+  let syncing = false;
+
+  document.title = media.title;
+  video.src = media.videoUrl;
+  audio.src = media.audioUrl;
+
+  function setMessage(text) {
+    message.textContent = text;
+  }
+
+  function syncAudio(force) {
+    if (!Number.isFinite(video.currentTime)) return;
+    const drift = Math.abs((audio.currentTime || 0) - video.currentTime);
+    if (force || drift > 0.25) {
+      syncing = true;
+      try {
+        audio.currentTime = video.currentTime;
+      } finally {
+        syncing = false;
+      }
+    }
+  }
+
+  video.addEventListener('play', function () {
+    syncAudio(true);
+    audio.playbackRate = video.playbackRate;
+    audio.volume = video.volume;
+    audio.muted = video.muted;
+    audio.play().then(function () {
+      setMessage('Audio is synced from Instagram\\'s separate audio stream.');
+    }).catch(function () {
+      setMessage('Press play again if the browser blocked the separate audio stream.');
+    });
+  });
+  video.addEventListener('pause', function () { audio.pause(); });
+  video.addEventListener('ended', function () { audio.pause(); });
+  video.addEventListener('seeking', function () { syncAudio(true); });
+  video.addEventListener('seeked', function () { syncAudio(true); });
+  video.addEventListener('ratechange', function () { audio.playbackRate = video.playbackRate; });
+  video.addEventListener('volumechange', function () {
+    audio.volume = video.volume;
+    audio.muted = video.muted;
+  });
+  video.addEventListener('timeupdate', function () {
+    if (!syncing && !video.paused) syncAudio(false);
+  });
+  audio.addEventListener('error', function () {
+    setMessage('The separate audio stream could not be loaded.');
+  });
+</script>
+</body>
+</html>`;
+    const objectUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    const openedWindow = window.open(objectUrl, '_blank', 'noopener');
+    if (!openedWindow) openUrlInTab(media.videoUrl);
+    window.setTimeout(function () {
+      URL.revokeObjectURL(objectUrl);
+    }, 120000);
+  }
+
   function saveBlob(blob, filename) {
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1343,15 +1441,7 @@
         return;
       }
 
-      muxVideoMedia(resolvedMedia)
-        .then(function (blob) {
-          hideStatus();
-          openUrlInTab(URL.createObjectURL(blob));
-        })
-        .catch(function (error) {
-          const fallbackUrl = handleMuxFailure(error, resolvedMedia);
-          if (fallbackUrl) openUrlInTab(fallbackUrl);
-        });
+      openSeparateStreamsInTab(resolvedMedia);
     }).catch(function (error) {
       console.warn('Instagram View Image in New Tab: could not open media.', error);
       handleMissingMediaUrl(media);
