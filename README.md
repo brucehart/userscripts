@@ -30,6 +30,7 @@ Scripts are grouped by site or application. Each folder contains a `README.md` w
 - `Yahoo Fantasy Football`
 - `Citi Global Management`
 - `Euler`
+- `ESPN`
 - `Instagram`
 - `New York Times`
 - `Walgreens`
