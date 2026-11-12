@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ESPN Remove Videos
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.0
+// @version      1.1
 // @description  Remove video players and embedded videos from ESPN pages, including dynamically loaded videos.
 // @author       Bruce J. Hart
 // @match        *://*.espn.com/*
@@ -19,6 +19,10 @@
     '.VideoPlayer',
     '.video-container',
     '.espn-video-player',
+    '.ClipsPlayerContainer',
+    '.WebPlayerContainer',
+    'disney-web-player',
+    '[data-testid="video-player-espn"]',
     '.vjs-player',
     '.video-js',
     '[data-module="video-player"]',

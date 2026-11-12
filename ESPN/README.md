@@ -4,7 +4,7 @@
 
 Removes HTML video elements, recognized video player containers, and common embedded video players from ESPN.com and its subdomains. Runs at the start of page loading and watches for players added by scrolling, lazy loading, or navigation within the site. Pauses native videos and releases their media sources before removing them.
 
-Recognized embeds include ESPN video URLs, YouTube, Vimeo, Dailymotion, and direct video or streaming playlist URLs. Video thumbnails and links outside recognized player containers remain visible. This script removes page elements; it does not guarantee that all video network requests are blocked. Players inside closed shadow roots or unrecognized third-party frames may require additional selectors.
+Recognized players include ESPN game-page clip players and Disney web players, including players whose video is encapsulated in a shadow root. Recognized embeds include ESPN video URLs, YouTube, Vimeo, Dailymotion, and direct video or streaming playlist URLs. Video thumbnails and links outside recognized player containers remain visible. This script removes page elements; it does not guarantee that all video network requests are blocked. Players inside closed shadow roots or unrecognized third-party frames may require additional selectors.
 
 ## Installation
 
