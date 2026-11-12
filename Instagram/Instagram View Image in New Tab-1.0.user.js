@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Instagram View Image in New Tab
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.5
+// @version      1.10
 // @description  Add right-click menu items on Instagram images and videos to open, save, or copy the real media.
 // @author       Bruce J. Hart
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
 // @run-at       document-idle
+// @require      https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js
+// @require      https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js
 // @grant        GM_openInTab
 // @grant        GM_download
 // @grant        GM_setClipboard
@@ -19,14 +21,22 @@
   'use strict';
 
   const MENU_ID = 'tm-instagram-view-image-menu';
+  const STATUS_ID = 'tm-instagram-view-image-status';
   const MAX_ANCESTOR_DEPTH = 8;
   const INSTAGRAM_MEDIA_PATH_PATTERN = /^\/(?:p|reel|reels|tv)\/[^/?#]+\/?/i;
   const INSTAGRAM_MEDIA_LINK_SELECTOR = 'a[href^="/p/"], a[href^="/reel/"], a[href^="/reels/"], a[href^="/tv/"]';
-  const VIDEO_URL_KEY_PATTERN = /^(?:video_url|playable_url|playable_url_quality_hd|dash_manifest|contentUrl|src|url)$/i;
-  const MAX_OBJECT_SEARCH_DEPTH = 8;
-  const MAX_OBJECT_SEARCH_NODES = 2500;
+  const DASH_MANIFEST_KEY_PATTERN = /dash_manifest/i;
+  const VIDEO_URL_KEY_PATTERN = /^(?:video_url|playable_url|playable_url_quality_hd|dash_manifest|video_dash_manifest|contentUrl|src|url)$/i;
+  const MAX_OBJECT_SEARCH_DEPTH = 12;
+  const MAX_OBJECT_SEARCH_NODES = 8000;
+  const FFMPEG_CORE_URL = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
   let activeMedia = null;
   let menu = null;
+  let statusBox = null;
+  let ffmpegInstance = null;
+  let ffmpegLoadPromise = null;
+  let muxQueue = Promise.resolve();
+  let lastFfmpegLogMessage = '';
 
   function normalizeUrl(rawUrl) {
     if (!rawUrl) return '';
@@ -102,6 +112,188 @@
     } catch (e) {
       return false;
     }
+  }
+
+  function createVideoDetails(videoUrl, audioUrl) {
+    return {
+      videoUrl: videoUrl || '',
+      audioUrl: audioUrl || ''
+    };
+  }
+
+  function hasVideoDetails(details) {
+    return Boolean(details && details.videoUrl);
+  }
+
+  function hasSeparateAudio(details) {
+    return Boolean(details && details.videoUrl && details.audioUrl && details.videoUrl !== details.audioUrl);
+  }
+
+  function videoDetailsFromUrl(url) {
+    return createVideoDetails(url, '');
+  }
+
+  function mediaUrlFingerprint(url) {
+    const normalizedUrl = normalizeAbsoluteUrl(url) || normalizeUrl(url);
+    if (!normalizedUrl) return '';
+
+    try {
+      const parsed = new URL(normalizedUrl);
+      return decodeURIComponent(parsed.pathname)
+        .toLowerCase()
+        .replace(/\/+$/g, '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function decodeBase64Text(rawValue) {
+    if (!rawValue) return '';
+    try {
+      const base64 = rawValue.replace(/-/g, '+').replace(/_/g, '/');
+      const paddedBase64 = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+      return atob(paddedBase64);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function mediaAssetId(url) {
+    const normalizedUrl = normalizeAbsoluteUrl(url) || normalizeUrl(url);
+    if (!normalizedUrl) return '';
+
+    try {
+      const parsed = new URL(normalizedUrl);
+      const encodedMetadata = parsed.searchParams.get('efg');
+      const metadataText = decodeBase64Text(encodedMetadata);
+      const match = metadataText.match(/"(?:xpv_asset_id|asset_id|video_id)"\s*:\s*(?:"([^"]+)"|([0-9]+))/);
+      return match ? match[1] || match[2] || '' : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function sameMediaUrl(leftUrl, rightUrl) {
+    const leftAssetId = mediaAssetId(leftUrl);
+    const rightAssetId = mediaAssetId(rightUrl);
+    if (leftAssetId && rightAssetId) return leftAssetId === rightAssetId;
+
+    const leftFingerprint = mediaUrlFingerprint(leftUrl);
+    const rightFingerprint = mediaUrlFingerprint(rightUrl);
+    return Boolean(leftFingerprint && rightFingerprint && leftFingerprint === rightFingerprint);
+  }
+
+  function selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch) {
+    const seen = new Set();
+    const uniqueCandidates = candidates.filter(function (details) {
+      if (!hasVideoDetails(details)) return false;
+
+      const key = `${details.videoUrl}\n${details.audioUrl || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    if (preferredVideoUrl) {
+      const matchingCandidates = uniqueCandidates.filter(function (details) {
+        return sameMediaUrl(details.videoUrl, preferredVideoUrl);
+      });
+      const matchingSeparateAudio = matchingCandidates.find(hasSeparateAudio);
+      if (matchingSeparateAudio) return matchingSeparateAudio;
+      if (matchingCandidates[0]) return matchingCandidates[0];
+      if (requirePreferredMatch) return createVideoDetails('', '');
+    }
+
+    return uniqueCandidates.find(hasSeparateAudio) || uniqueCandidates[0] || createVideoDetails('', '');
+  }
+
+  function keySearchPriority(key) {
+    if (DASH_MANIFEST_KEY_PATTERN.test(key)) return 0;
+    if (/^(?:video_url|playable_url_quality_hd|playable_url|contentUrl)$/i.test(key)) return 1;
+    if (/^(?:src|url)$/i.test(key)) return 2;
+    return 3;
+  }
+
+  function numericAttribute(element, names) {
+    for (const name of names) {
+      const value = parseFloat(element.getAttribute(name) || '');
+      if (Number.isFinite(value)) return value;
+    }
+
+    return 0;
+  }
+
+  function childElementsByName(element, localName) {
+    const normalizedName = localName.toLowerCase();
+    return [...element.children].filter(function (child) {
+      return child.localName && child.localName.toLowerCase() === normalizedName;
+    });
+  }
+
+  function firstChildTextByName(element, localName) {
+    const child = childElementsByName(element, localName)[0];
+    return child ? child.textContent || '' : '';
+  }
+
+  function dashAdaptationType(adaptationSet, representation) {
+    const combinedAttributes = [
+      adaptationSet.getAttribute('contentType'),
+      adaptationSet.getAttribute('mimeType'),
+      adaptationSet.getAttribute('codecs'),
+      representation && representation.getAttribute('mimeType'),
+      representation && representation.getAttribute('codecs')
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    if (/audio|mp4a|opus|vorbis/.test(combinedAttributes)) return 'audio';
+    if (/video|avc|hev|hvc|vp9|h26[45]/.test(combinedAttributes)) return 'video';
+    return '';
+  }
+
+  function dashRepresentationScore(adaptationSet, representation, type) {
+    const bandwidth = numericAttribute(representation, ['bandwidth'])
+      || numericAttribute(adaptationSet, ['bandwidth']);
+
+    if (type === 'audio') return bandwidth;
+
+    const width = numericAttribute(representation, ['width']) || numericAttribute(adaptationSet, ['width']);
+    const height = numericAttribute(representation, ['height']) || numericAttribute(adaptationSet, ['height']);
+    return (height * 100000000) + (width * 100000) + bandwidth;
+  }
+
+  function bestDashBaseUrlsFromDocument(doc) {
+    const parserError = doc.querySelector('parsererror');
+    if (parserError) return createVideoDetails('', '');
+
+    const best = {
+      video: { url: '', score: -1 },
+      audio: { url: '', score: -1 }
+    };
+    const adaptationSets = [...doc.getElementsByTagName('*')].filter(function (element) {
+      return element.localName && element.localName.toLowerCase() === 'adaptationset';
+    });
+
+    for (const adaptationSet of adaptationSets) {
+      let representations = childElementsByName(adaptationSet, 'Representation');
+      if (!representations.length) representations = [adaptationSet];
+
+      for (const representation of representations) {
+        const type = dashAdaptationType(adaptationSet, representation);
+        if (type !== 'video' && type !== 'audio') continue;
+
+        const baseUrl = normalizeAbsoluteUrl(
+          firstChildTextByName(representation, 'BaseURL')
+          || firstChildTextByName(adaptationSet, 'BaseURL')
+        );
+        if (!baseUrl) continue;
+
+        const score = dashRepresentationScore(adaptationSet, representation, type);
+        if (score > best[type].score) {
+          best[type] = { url: baseUrl, score };
+        }
+      }
+    }
+
+    return createVideoDetails(best.video.url, best.audio.url);
   }
 
   function currentInstagramMediaPageUrl() {
@@ -225,6 +417,26 @@
     return textarea.value;
   }
 
+  function escapeBareXmlAmpersands(text) {
+    return text.replace(/&(?!#\d+;|#x[0-9a-f]+;|[a-z][a-z0-9_.:-]*;)/gi, '&amp;');
+  }
+
+  function dashManifestTextCandidates(rawValue) {
+    const candidates = [];
+    const seen = new Set();
+
+    function add(value) {
+      if (typeof value !== 'string' || seen.has(value)) return;
+      seen.add(value);
+      candidates.push(value);
+    }
+
+    add(rawValue);
+    add(decodeHtmlEntities(rawValue));
+
+    return candidates;
+  }
+
   function decodeJsonString(rawValue) {
     try {
       return JSON.parse(`"${rawValue}"`);
@@ -288,16 +500,39 @@
     return expandedValues;
   }
 
-  function videoUrlFromDashManifest(rawValue) {
+  function videoDetailsFromDashManifest(rawValue) {
     for (const candidate of expandPossibleVideoStrings(rawValue)) {
-      const baseUrlMatch = candidate.match(/<BaseURL>([\s\S]*?)<\/BaseURL>/i);
+      for (const manifestText of dashManifestTextCandidates(candidate)) {
+        if (!/<BaseURL\b/i.test(manifestText)) continue;
+
+        const safeManifestText = escapeBareXmlAmpersands(manifestText);
+        const doc = new DOMParser().parseFromString(safeManifestText, 'application/xml');
+        const details = bestDashBaseUrlsFromDocument(doc);
+        if (hasVideoDetails(details)) return details;
+      }
+
+      const fallbackText = decodeHtmlEntities(candidate);
+      const baseUrlMatch = fallbackText.match(/<BaseURL[^>]*>([\s\S]*?)<\/BaseURL>/i);
       if (!baseUrlMatch) continue;
 
       const url = normalizeAbsoluteUrl(baseUrlMatch[1]);
-      if (isLikelyVideoUrl(url)) return url;
+      if (isLikelyVideoUrl(url)) return videoDetailsFromUrl(url);
     }
 
-    return '';
+    return createVideoDetails('', '');
+  }
+
+  function videoUrlFromDashManifest(rawValue) {
+    return videoDetailsFromDashManifest(rawValue).videoUrl;
+  }
+
+  function normalizePotentialVideoDetails(rawValue) {
+    if (typeof rawValue !== 'string') return createVideoDetails('', '');
+
+    const manifestDetails = videoDetailsFromDashManifest(rawValue);
+    if (hasVideoDetails(manifestDetails)) return manifestDetails;
+
+    return videoDetailsFromUrl(normalizePotentialVideoUrl(rawValue));
   }
 
   function normalizePotentialVideoUrl(rawValue) {
@@ -320,33 +555,33 @@
     return '';
   }
 
-  function findVideoUrlInValue(value, state, depth) {
-    if (!value || state.nodes > MAX_OBJECT_SEARCH_NODES || depth > MAX_OBJECT_SEARCH_DEPTH) return '';
+  function collectVideoDetailsInValue(value, state, depth, candidates) {
+    if (!value || state.nodes > MAX_OBJECT_SEARCH_NODES || depth > MAX_OBJECT_SEARCH_DEPTH) return;
     state.nodes += 1;
 
-    if (typeof value === 'string') return normalizePotentialVideoUrl(value);
-    if (typeof value !== 'object' && typeof value !== 'function') return '';
-    if (state.visited.has(value)) return '';
+    if (typeof value === 'string') {
+      const details = normalizePotentialVideoDetails(value);
+      if (hasVideoDetails(details)) candidates.push(details);
+      return;
+    }
+    if (typeof value !== 'object' && typeof value !== 'function') return;
+    if (state.visited.has(value)) return;
 
     state.visited.add(value);
 
     if (Array.isArray(value)) {
       for (const item of value) {
-        const url = findVideoUrlInValue(item, state, depth + 1);
-        if (url) return url;
+        collectVideoDetailsInValue(item, state, depth + 1, candidates);
       }
-      return '';
+      return;
     }
 
-    const keys = Object.keys(value);
-    const priorityKeys = keys.filter(function (key) {
-      return VIDEO_URL_KEY_PATTERN.test(key);
-    });
-    const remainingKeys = keys.filter(function (key) {
-      return !VIDEO_URL_KEY_PATTERN.test(key);
+    const keys = Object.keys(value).sort(function (left, right) {
+      const priorityDelta = keySearchPriority(left) - keySearchPriority(right);
+      return priorityDelta || 0;
     });
 
-    for (const key of priorityKeys.concat(remainingKeys)) {
+    for (const key of keys) {
       let nestedValue;
       try {
         nestedValue = value[key];
@@ -354,37 +589,24 @@
         continue;
       }
 
-      const url = findVideoUrlInValue(nestedValue, state, depth + 1);
-      if (url) return url;
-    }
+      if (
+        keySearchPriority(key) > 2
+        && !VIDEO_URL_KEY_PATTERN.test(key)
+        && (nestedValue === null || (typeof nestedValue !== 'object' && typeof nestedValue !== 'function'))
+      ) {
+        continue;
+      }
 
-    return '';
+      collectVideoDetailsInValue(nestedValue, state, depth + 1, candidates);
+    }
   }
 
-  function findVideoUrlInElementData(element) {
+  function videoDetailsFromAttachedPageData(startElement, preferredVideoUrl) {
     const state = {
       visited: new WeakSet(),
       nodes: 0
     };
-
-    for (const key of Object.keys(element)) {
-      if (!/react|fiber|props|inst|internal/i.test(key)) continue;
-
-      let value;
-      try {
-        value = element[key];
-      } catch (e) {
-        continue;
-      }
-
-      const url = findVideoUrlInValue(value, state, 0);
-      if (url) return url;
-    }
-
-    return '';
-  }
-
-  function videoUrlFromAttachedPageData(startElement) {
+    const candidates = [];
     const elements = [];
     let element = startElement;
     let depth = 0;
@@ -396,26 +618,39 @@
     }
 
     for (const candidate of elements) {
-      const url = findVideoUrlInElementData(candidate);
-      if (url) return url;
+      for (const key of Object.keys(candidate)) {
+        if (!/react|fiber|props|inst|internal/i.test(key)) continue;
+
+        let value;
+        try {
+          value = candidate[key];
+        } catch (e) {
+          continue;
+        }
+
+        collectVideoDetailsInValue(value, state, 0, candidates);
+      }
     }
 
-    return '';
+    return selectVideoDetails(candidates, preferredVideoUrl, Boolean(preferredVideoUrl));
   }
 
-  function videoUrlFromPerformanceEntries() {
-    if (!window.performance || typeof window.performance.getEntriesByType !== 'function') return '';
+  function videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch) {
+    if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
+      return createVideoDetails('', '');
+    }
 
     const entries = window.performance.getEntriesByType('resource').slice().reverse();
+    const candidates = [];
     for (const entry of entries) {
       const url = normalizePotentialVideoUrl(entry.name);
-      if (url) return url;
+      if (url) candidates.push(videoDetailsFromUrl(url));
     }
 
-    return '';
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function videoUrlFromPageGlobals() {
+  function videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch) {
     const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
     const globalNames = [
       '_sharedData',
@@ -428,6 +663,7 @@
       visited: new WeakSet(),
       nodes: 0
     };
+    const candidates = [];
 
     for (const name of globalNames) {
       let value;
@@ -437,36 +673,28 @@
         continue;
       }
 
-      const url = findVideoUrlInValue(value, state, 0);
-      if (url) return url;
+      collectVideoDetailsInValue(value, state, 0, candidates);
     }
 
-    return '';
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function videoUrlFromDocumentScripts() {
+  function videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch) {
     const scripts = [...document.scripts].slice().reverse();
+    const candidates = [];
     for (const script of scripts) {
-      const url = extractVideoUrlFromHtml(script.textContent || '');
-      if (url) return url;
+      candidates.push(...extractVideoDetailsCandidatesFromHtml(script.textContent || ''));
     }
 
-    return '';
+    return selectVideoDetails(candidates, preferredVideoUrl, requirePreferredMatch);
   }
 
-  function extractVideoUrlFromHtml(html) {
+  function extractVideoDetailsCandidatesFromHtml(html) {
     const decodedHtml = decodeHtmlEntities(html);
-    const doc = new DOMParser().parseFromString(decodedHtml, 'text/html');
-    const metaVideo = doc.querySelector([
-      'meta[property="og:video"]',
-      'meta[property="og:video:url"]',
-      'meta[property="og:video:secure_url"]',
-      'meta[name="twitter:player:stream"]'
-    ].join(','));
-    const metaUrl = metaVideo ? normalizePotentialVideoUrl(metaVideo.getAttribute('content')) : '';
-    if (metaUrl) return metaUrl;
-
+    const candidates = [];
     const patterns = [
+      /"dash_manifest"\s*:\s*"((?:\\.|[^"\\])+)"/,
+      /"video_dash_manifest"\s*:\s*"((?:\\.|[^"\\])+)"/,
       /"video_url"\s*:\s*"((?:\\.|[^"\\])+)"/,
       /"playable_url_quality_hd"\s*:\s*"((?:\\.|[^"\\])+)"/,
       /"playable_url"\s*:\s*"((?:\\.|[^"\\])+)"/,
@@ -477,11 +705,29 @@
       const match = decodedHtml.match(pattern);
       if (!match) continue;
 
-      const url = normalizePotentialVideoUrl(decodeJsonString(match[1]));
-      if (url) return url;
+      const details = normalizePotentialVideoDetails(decodeJsonString(match[1]));
+      if (hasVideoDetails(details)) candidates.push(details);
     }
 
-    return '';
+    const doc = new DOMParser().parseFromString(decodedHtml, 'text/html');
+    const metaVideo = doc.querySelector([
+      'meta[property="og:video"]',
+      'meta[property="og:video:url"]',
+      'meta[property="og:video:secure_url"]',
+      'meta[name="twitter:player:stream"]'
+    ].join(','));
+    const metaUrl = metaVideo ? normalizePotentialVideoUrl(metaVideo.getAttribute('content')) : '';
+    if (metaUrl) candidates.push(videoDetailsFromUrl(metaUrl));
+
+    return candidates;
+  }
+
+  function extractVideoDetailsFromHtml(html, preferredVideoUrl, requirePreferredMatch) {
+    return selectVideoDetails(
+      extractVideoDetailsCandidatesFromHtml(html),
+      preferredVideoUrl,
+      requirePreferredMatch
+    );
   }
 
   function getText(url) {
@@ -511,55 +757,121 @@
     });
   }
 
-  function resolveVideoMediaUrl(media) {
-    if (media.url && isLikelyVideoUrl(media.url)) return Promise.resolve(media.url);
+  function applyVideoDetailsToMedia(media, details) {
+    if (!media || !hasVideoDetails(details)) return media;
+
+    media.videoUrl = details.videoUrl;
+    media.audioUrl = details.audioUrl || '';
+    media.url = details.videoUrl;
+    media.needsMuxing = hasSeparateAudio(details);
+    media.filename = filenameFromMediaUrl(details.videoUrl, media.type);
+    return media;
+  }
+
+  function directVideoDetailsFromMedia(media) {
+    const url = normalizePotentialVideoUrl(media && (media.videoUrl || media.url));
+    return url ? videoDetailsFromUrl(url) : createVideoDetails('', '');
+  }
+
+  function resolveVideoMedia(media) {
+    if (!media) return Promise.resolve(null);
+    if (media.needsMuxing && media.videoUrl && media.audioUrl) return Promise.resolve(media);
+
+    const preferredDetails = directVideoDetailsFromMedia(media);
+    const preferredVideoUrl = preferredDetails.videoUrl || '';
+    const requirePreferredMatch = Boolean(preferredVideoUrl);
+    let fallbackDetails = createVideoDetails('', '');
+    function rememberFallback(details) {
+      if (hasVideoDetails(details) && !hasVideoDetails(fallbackDetails)) {
+        fallbackDetails = details;
+      }
+      return hasSeparateAudio(details);
+    }
+
     if (media.videoElement) {
-      const attachedUrl = videoUrlFromAttachedPageData(media.videoElement);
-      if (attachedUrl) {
-        media.url = attachedUrl;
-        media.filename = filenameFromMediaUrl(attachedUrl, media.type);
-        return Promise.resolve(attachedUrl);
+      const attachedDetails = videoDetailsFromAttachedPageData(media.videoElement, preferredVideoUrl);
+      if (rememberFallback(attachedDetails)) {
+        return Promise.resolve(applyVideoDetailsToMedia(media, attachedDetails));
       }
     }
 
-    const performanceUrl = videoUrlFromPerformanceEntries();
-    if (performanceUrl) {
-      media.url = performanceUrl;
-      media.filename = filenameFromMediaUrl(performanceUrl, media.type);
-      return Promise.resolve(performanceUrl);
+    if (media.pageUrl) {
+      if (media.resolvedMediaPromise) return media.resolvedMediaPromise;
+
+      media.resolvedMediaPromise = getText(media.pageUrl)
+        .then(function (html) {
+          return extractVideoDetailsFromHtml(html, preferredVideoUrl, requirePreferredMatch);
+        })
+        .then(function (details) {
+          if (hasVideoDetails(details)) return applyVideoDetailsToMedia(media, details);
+
+          if (hasVideoDetails(fallbackDetails)) return applyVideoDetailsToMedia(media, fallbackDetails);
+
+          if (hasVideoDetails(preferredDetails)) return applyVideoDetailsToMedia(media, preferredDetails);
+
+          const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(scriptDetails)) return applyVideoDetailsToMedia(media, scriptDetails);
+
+          const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(globalDetails)) return applyVideoDetailsToMedia(media, globalDetails);
+
+          const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(performanceDetails)) return applyVideoDetailsToMedia(media, performanceDetails);
+
+          return media;
+        })
+        .catch(function (error) {
+          console.warn('Instagram View Image in New Tab: could not resolve video URL.', error);
+
+          if (hasVideoDetails(fallbackDetails)) return applyVideoDetailsToMedia(media, fallbackDetails);
+
+          if (hasVideoDetails(preferredDetails)) return applyVideoDetailsToMedia(media, preferredDetails);
+
+          const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(scriptDetails)) return applyVideoDetailsToMedia(media, scriptDetails);
+
+          const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(globalDetails)) return applyVideoDetailsToMedia(media, globalDetails);
+
+          const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
+          if (hasVideoDetails(performanceDetails)) return applyVideoDetailsToMedia(media, performanceDetails);
+
+          return media;
+        });
+
+      return media.resolvedMediaPromise;
     }
 
-    const globalUrl = videoUrlFromPageGlobals();
-    if (globalUrl) {
-      media.url = globalUrl;
-      media.filename = filenameFromMediaUrl(globalUrl, media.type);
-      return Promise.resolve(globalUrl);
+    if (hasVideoDetails(fallbackDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, fallbackDetails));
     }
 
-    const scriptUrl = videoUrlFromDocumentScripts();
-    if (scriptUrl) {
-      media.url = scriptUrl;
-      media.filename = filenameFromMediaUrl(scriptUrl, media.type);
-      return Promise.resolve(scriptUrl);
+    if (hasVideoDetails(preferredDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, preferredDetails));
     }
 
-    if (!media.pageUrl) return Promise.resolve('');
+    const scriptDetails = videoDetailsFromDocumentScripts(preferredVideoUrl, requirePreferredMatch);
+    if (hasVideoDetails(scriptDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, scriptDetails));
+    }
 
-    if (media.resolvedUrlPromise) return media.resolvedUrlPromise;
+    const globalDetails = videoDetailsFromPageGlobals(preferredVideoUrl, requirePreferredMatch);
+    if (hasVideoDetails(globalDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, globalDetails));
+    }
 
-    media.resolvedUrlPromise = getText(media.pageUrl)
-      .then(extractVideoUrlFromHtml)
-      .then(function (videoUrl) {
-        media.url = videoUrl;
-        media.filename = filenameFromMediaUrl(videoUrl, media.type);
-        return videoUrl;
-      })
-      .catch(function (error) {
-        console.warn('Instagram View Image in New Tab: could not resolve video URL.', error);
-        return '';
-      });
+    const performanceDetails = videoDetailsFromPerformanceEntries(preferredVideoUrl, requirePreferredMatch);
+    if (hasVideoDetails(performanceDetails)) {
+      return Promise.resolve(applyVideoDetailsToMedia(media, performanceDetails));
+    }
 
-    return media.resolvedUrlPromise;
+    return Promise.resolve(media);
+  }
+
+  function resolveVideoMediaUrl(media) {
+    return resolveVideoMedia(media).then(function (resolvedMedia) {
+      return resolvedMedia ? resolvedMedia.videoUrl || resolvedMedia.url || '' : '';
+    });
   }
 
   function resolveActiveMediaUrl(media) {
@@ -587,6 +899,8 @@
     const pageUrl = instagramMediaPageUrlFromElement(video);
     return {
       url: videoUrl,
+      videoUrl,
+      audioUrl: '',
       type: 'video',
       pageUrl,
       videoElement: video
@@ -721,9 +1035,12 @@
   function showMenu(x, y, media) {
     activeMedia = {
       url: media.url,
+      videoUrl: media.videoUrl || media.url,
+      audioUrl: media.audioUrl || '',
       type: media.type,
       pageUrl: media.pageUrl || '',
       videoElement: media.videoElement || null,
+      needsMuxing: hasSeparateAudio(media),
       filename: filenameFromMediaUrl(media.url, media.type)
     };
 
@@ -744,6 +1061,345 @@
     if (menu) menu.style.display = 'none';
   }
 
+  function ensureStatusBox() {
+    if (statusBox) return statusBox;
+
+    statusBox = document.createElement('div');
+    statusBox.id = STATUS_ID;
+    statusBox.innerHTML = `
+      <div data-role="message"></div>
+      <div data-role="detail"></div>
+    `;
+    document.body.appendChild(statusBox);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #${STATUS_ID} {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483647;
+        display: none;
+        max-width: min(360px, calc(100vw - 32px));
+        padding: 10px 12px;
+        background: #111;
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+        color: #fff;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      #${STATUS_ID} [data-role="message"] {
+        font-weight: 600;
+      }
+
+      #${STATUS_ID} [data-role="detail"] {
+        margin-top: 2px;
+        color: rgba(255, 255, 255, 0.72);
+      }
+    `;
+    document.head.appendChild(style);
+
+    return statusBox;
+  }
+
+  function showStatus(message, detail) {
+    const box = ensureStatusBox();
+    box.querySelector('[data-role="message"]').textContent = message || '';
+    box.querySelector('[data-role="detail"]').textContent = detail || '';
+    box.style.display = 'block';
+  }
+
+  function hideStatus() {
+    if (statusBox) statusBox.style.display = 'none';
+  }
+
+  function formatPercent(value) {
+    if (!Number.isFinite(value) || value <= 0) return '';
+    return `${Math.min(100, Math.max(0, Math.round(value * 100)))}%`;
+  }
+
+  function progressDetail(event) {
+    if (!event || !event.lengthComputable || !event.total) return '';
+    return formatPercent(event.loaded / event.total);
+  }
+
+  function openUrlInTab(url) {
+    if (typeof GM_openInTab === 'function') {
+      GM_openInTab(url, { active: true, insert: true });
+    } else {
+      window.open(url, '_blank', 'noopener');
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function openSeparateStreamsInTab(media) {
+    const pageData = JSON.stringify({
+      title: media.filename || 'Instagram video',
+      videoUrl: media.videoUrl,
+      audioUrl: media.audioUrl
+    }).replace(/</g, '\\u003c');
+    const title = escapeHtml(media.filename || 'Instagram video');
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>
+  html, body { margin: 0; min-height: 100%; background: #111; color: #f5f5f5; font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: 1fr auto; }
+  main { min-height: 0; display: grid; place-items: center; }
+  video { display: block; max-width: 100vw; max-height: calc(100vh - 44px); background: #000; }
+  footer { min-height: 44px; box-sizing: border-box; padding: 10px 14px; color: rgba(255,255,255,.72); }
+</style>
+</head>
+<body>
+<main><video id="video" controls autoplay playsinline></video></main>
+<audio id="audio" preload="auto"></audio>
+<footer id="message">Audio is synced from Instagram's separate audio stream.</footer>
+<script>
+  const media = ${pageData};
+  const video = document.getElementById('video');
+  const audio = document.getElementById('audio');
+  const message = document.getElementById('message');
+  let syncing = false;
+
+  document.title = media.title;
+  video.src = media.videoUrl;
+  audio.src = media.audioUrl;
+
+  function setMessage(text) {
+    message.textContent = text;
+  }
+
+  function syncAudio(force) {
+    if (!Number.isFinite(video.currentTime)) return;
+    const drift = Math.abs((audio.currentTime || 0) - video.currentTime);
+    if (force || drift > 0.25) {
+      syncing = true;
+      try {
+        audio.currentTime = video.currentTime;
+      } finally {
+        syncing = false;
+      }
+    }
+  }
+
+  video.addEventListener('play', function () {
+    syncAudio(true);
+    audio.playbackRate = video.playbackRate;
+    audio.volume = video.volume;
+    audio.muted = video.muted;
+    audio.play().then(function () {
+      setMessage('Audio is synced from Instagram\\'s separate audio stream.');
+    }).catch(function () {
+      setMessage('Press play again if the browser blocked the separate audio stream.');
+    });
+  });
+  video.addEventListener('pause', function () { audio.pause(); });
+  video.addEventListener('ended', function () { audio.pause(); });
+  video.addEventListener('seeking', function () { syncAudio(true); });
+  video.addEventListener('seeked', function () { syncAudio(true); });
+  video.addEventListener('ratechange', function () { audio.playbackRate = video.playbackRate; });
+  video.addEventListener('volumechange', function () {
+    audio.volume = video.volume;
+    audio.muted = video.muted;
+  });
+  video.addEventListener('timeupdate', function () {
+    if (!syncing && !video.paused) syncAudio(false);
+  });
+  audio.addEventListener('error', function () {
+    setMessage('The separate audio stream could not be loaded.');
+  });
+</script>
+</body>
+</html>`;
+    const objectUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    const openedWindow = window.open(objectUrl, '_blank', 'noopener');
+    if (!openedWindow) openUrlInTab(media.videoUrl);
+    window.setTimeout(function () {
+      URL.revokeObjectURL(objectUrl);
+    }, 120000);
+  }
+
+  function saveBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(function () {
+      URL.revokeObjectURL(objectUrl);
+    }, 30000);
+  }
+
+  function getFfmpegLibrary() {
+    const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+    return globalThis.FFmpeg || window.FFmpeg || pageWindow.FFmpeg || null;
+  }
+
+  function ensureFfmpeg() {
+    const ffmpegLibrary = getFfmpegLibrary();
+    if (!ffmpegLibrary || typeof ffmpegLibrary.createFFmpeg !== 'function') {
+      return Promise.reject(new Error('ffmpeg.wasm did not load'));
+    }
+
+    if (!ffmpegInstance) {
+      ffmpegInstance = ffmpegLibrary.createFFmpeg({
+        log: false,
+        corePath: FFMPEG_CORE_URL,
+        progress: function (progress) {
+          const percent = progress && Number.isFinite(progress.ratio) ? formatPercent(progress.ratio) : '';
+          showStatus('Merging video and audio...', percent);
+        }
+      });
+      ffmpegInstance.setLogger(function (event) {
+        if (event && event.message) lastFfmpegLogMessage = event.message;
+      });
+    }
+
+    if (ffmpegInstance.isLoaded()) return Promise.resolve(ffmpegInstance);
+    if (ffmpegLoadPromise) return ffmpegLoadPromise;
+
+    showStatus('Loading video merger...', 'This can take a moment the first time.');
+    ffmpegLoadPromise = ffmpegInstance.load()
+      .then(function () {
+        return ffmpegInstance;
+      })
+      .catch(function (error) {
+        ffmpegLoadPromise = null;
+        throw error;
+      });
+
+    return ffmpegLoadPromise;
+  }
+
+  function getBinary(url, label) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise(function (resolve, reject) {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          responseType: 'arraybuffer',
+          onprogress: function (event) {
+            showStatus(`Downloading ${label}...`, progressDetail(event));
+          },
+          onload: function (response) {
+            if (response.status >= 200 && response.status < 300 && response.response) {
+              resolve(new Uint8Array(response.response));
+            } else {
+              reject(new Error(`${label} request failed with status ${response.status}`));
+            }
+          },
+          onerror: function () {
+            reject(new Error(`${label} request failed`));
+          }
+        });
+      });
+    }
+
+    showStatus(`Downloading ${label}...`, '');
+    return fetch(url, { credentials: 'omit' }).then(function (response) {
+      if (!response.ok) throw new Error(`${label} request failed with status ${response.status}`);
+      return response.arrayBuffer();
+    }).then(function (buffer) {
+      return new Uint8Array(buffer);
+    });
+  }
+
+  function removeFfmpegFile(ffmpeg, filename) {
+    try {
+      ffmpeg.FS('unlink', filename);
+    } catch (e) {
+      // Missing cleanup files are harmless.
+    }
+  }
+
+  function muxVideoMediaNow(media) {
+    if (!media || !media.videoUrl || !media.audioUrl) {
+      return Promise.reject(new Error('Missing separate video or audio stream'));
+    }
+
+    lastFfmpegLogMessage = '';
+    const id = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    const videoInput = `instagram-video-${id}.mp4`;
+    const audioInput = `instagram-audio-${id}.m4a`;
+    const output = `instagram-merged-${id}.mp4`;
+    let ffmpegForCleanup = null;
+
+    return ensureFfmpeg()
+      .then(function (ffmpeg) {
+        ffmpegForCleanup = ffmpeg;
+        return getBinary(media.videoUrl, 'video stream')
+          .then(function (videoBytes) {
+            return getBinary(media.audioUrl, 'audio stream').then(function (audioBytes) {
+              return { ffmpeg, videoBytes, audioBytes };
+            });
+          });
+      })
+      .then(function (payload) {
+        const ffmpeg = payload.ffmpeg;
+        showStatus('Preparing video and audio...', '');
+        ffmpeg.FS('writeFile', videoInput, payload.videoBytes);
+        ffmpeg.FS('writeFile', audioInput, payload.audioBytes);
+        showStatus('Merging video and audio...', '');
+
+        return ffmpeg.run(
+          '-i', videoInput,
+          '-i', audioInput,
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-c', 'copy',
+          '-shortest',
+          output
+        ).then(function () {
+          const mergedBytes = ffmpeg.FS('readFile', output);
+          return new Blob([mergedBytes], { type: 'video/mp4' });
+        });
+      })
+      .finally(function () {
+        if (!ffmpegForCleanup) return;
+        removeFfmpegFile(ffmpegForCleanup, videoInput);
+        removeFfmpegFile(ffmpegForCleanup, audioInput);
+        removeFfmpegFile(ffmpegForCleanup, output);
+      });
+  }
+
+  function muxVideoMedia(media) {
+    const run = muxQueue.catch(function () {}).then(function () {
+      return muxVideoMediaNow(media);
+    });
+    muxQueue = run.catch(function () {});
+    return run;
+  }
+
+  function handleMuxFailure(error, media) {
+    console.warn('Instagram View Image in New Tab: could not merge video and audio.', error);
+    hideStatus();
+
+    const detail = lastFfmpegLogMessage || (error && error.message) || String(error || '');
+    const detailSuffix = detail ? `\n\nLast merge error: ${detail}` : '';
+
+    if (media && media.videoUrl) {
+      window.alert(`Found separate Instagram video and audio streams, but could not merge them in this browser. Falling back to the video-only stream.${detailSuffix}`);
+      return media.videoUrl;
+    }
+
+    window.alert(`Found separate Instagram video and audio streams, but could not merge them in this browser.${detailSuffix}`);
+    return '';
+  }
+
   function handleMenuClick(event) {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
@@ -761,17 +1417,34 @@
     const media = activeMedia;
     hideMenu();
 
-    resolveActiveMediaUrl(media).then(function (mediaUrl) {
+    if (!media || media.type !== 'video') {
+      resolveActiveMediaUrl(media).then(function (mediaUrl) {
+        if (!mediaUrl) {
+          handleMissingMediaUrl(media);
+          return;
+        }
+
+        openUrlInTab(mediaUrl);
+      });
+      return;
+    }
+
+    resolveVideoMedia(media).then(function (resolvedMedia) {
+      const mediaUrl = resolvedMedia && (resolvedMedia.videoUrl || resolvedMedia.url);
       if (!mediaUrl) {
         handleMissingMediaUrl(media);
         return;
       }
 
-      if (typeof GM_openInTab === 'function') {
-        GM_openInTab(mediaUrl, { active: true, insert: true });
-      } else {
-        window.open(mediaUrl, '_blank', 'noopener');
+      if (!hasSeparateAudio(resolvedMedia)) {
+        openUrlInTab(mediaUrl);
+        return;
       }
+
+      openSeparateStreamsInTab(resolvedMedia);
+    }).catch(function (error) {
+      console.warn('Instagram View Image in New Tab: could not open media.', error);
+      handleMissingMediaUrl(media);
     });
   }
 
@@ -779,16 +1452,76 @@
     const media = activeMedia;
     hideMenu();
 
-    resolveActiveMediaUrl(media).then(function (mediaUrl) {
-      if (!media || !mediaUrl) {
+    if (!media || media.type !== 'video') {
+      resolveActiveMediaUrl(media).then(function (mediaUrl) {
+        if (!media || !mediaUrl) {
+          handleMissingMediaUrl(media);
+          return;
+        }
+
+        if (typeof GM_download === 'function') {
+          GM_download({
+            url: mediaUrl,
+            name: media.filename,
+            saveAs: true
+          });
+          return;
+        }
+
+        const link = document.createElement('a');
+        link.href = mediaUrl;
+        link.download = media.filename;
+        link.rel = 'noopener';
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
+      return;
+    }
+
+    resolveVideoMedia(media).then(function (resolvedMedia) {
+      const mediaUrl = resolvedMedia && (resolvedMedia.videoUrl || resolvedMedia.url);
+      if (!mediaUrl) {
         handleMissingMediaUrl(media);
+        return;
+      }
+
+      if (hasSeparateAudio(resolvedMedia)) {
+        muxVideoMedia(resolvedMedia)
+          .then(function (blob) {
+            hideStatus();
+            saveBlob(blob, resolvedMedia.filename);
+          })
+          .catch(function (error) {
+            const fallbackUrl = handleMuxFailure(error, resolvedMedia);
+            if (!fallbackUrl) return;
+
+            if (typeof GM_download === 'function') {
+              GM_download({
+                url: fallbackUrl,
+                name: resolvedMedia.filename,
+                saveAs: true
+              });
+              return;
+            }
+
+            const link = document.createElement('a');
+            link.href = fallbackUrl;
+            link.download = resolvedMedia.filename;
+            link.rel = 'noopener';
+            link.target = '_blank';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          });
         return;
       }
 
       if (typeof GM_download === 'function') {
         GM_download({
           url: mediaUrl,
-          name: media.filename,
+          name: resolvedMedia.filename,
           saveAs: true
         });
         return;
@@ -796,12 +1529,15 @@
 
       const link = document.createElement('a');
       link.href = mediaUrl;
-      link.download = media.filename;
+      link.download = resolvedMedia.filename;
       link.rel = 'noopener';
       link.target = '_blank';
       document.body.appendChild(link);
       link.click();
       link.remove();
+    }).catch(function (error) {
+      console.warn('Instagram View Image in New Tab: could not save media.', error);
+      handleMissingMediaUrl(media);
     });
   }
 
@@ -887,6 +1623,14 @@
     return copyTextToClipboard(mediaUrl).catch(handleCopyTextFailure);
   }
 
+  function copyVideoStreamUrls(media) {
+    const text = hasSeparateAudio(media)
+      ? `Video: ${media.videoUrl}\nAudio: ${media.audioUrl}`
+      : media.videoUrl || media.url || '';
+
+    return copyTextToClipboard(text).catch(handleCopyTextFailure);
+  }
+
   function copyActiveMedia() {
     const media = activeMedia;
     hideMenu();
@@ -894,12 +1638,15 @@
     if (!media) return;
 
     if (media.type === 'video') {
-      resolveActiveMediaUrl(media).then(function (mediaUrl) {
-        if (mediaUrl) {
-          copyMediaUrlFallback(mediaUrl);
+      resolveVideoMedia(media).then(function (resolvedMedia) {
+        if (resolvedMedia && (resolvedMedia.videoUrl || resolvedMedia.url)) {
+          copyVideoStreamUrls(resolvedMedia);
         } else {
           handleMissingMediaUrl(media);
         }
+      }).catch(function (error) {
+        console.warn('Instagram View Image in New Tab: could not copy video URL.', error);
+        handleMissingMediaUrl(media);
       });
       return;
     }
