@@ -33,6 +33,7 @@ Scripts are grouped by site or application. Each folder contains a `README.md` w
 - `ESPN`
 - `Instagram`
 - `New York Times`
+- `NY Post`
 - `Walgreens`
 - `YouTube Instagram Facebook`
 

@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         ESPN Remove Videos
+// @name         NY Post Remove Videos
 // @namespace    https://github.com/brucehart/userscripts
-// @version      1.1
-// @description  Remove video players and embedded videos from ESPN pages, including dynamically loaded videos.
+// @version      1.0
+// @description  Remove video players and embedded videos from NY Post pages, including dynamically loaded videos.
 // @author       Bruce J. Hart
-// @match        *://*.espn.com/*
+// @match        *://*.nypost.com/*
 // @run-at       document-start
 // @grant        GM_addStyle
 // ==/UserScript==
@@ -14,18 +14,17 @@
 
   // Target player containers rather than whole articles or generic media cards.
   const PLAYER_SELECTOR = [
+    '.nyp-video-player',
+    '.nyp-video-player__video-container',
+    '.story__video',
+    '.jwplayer',
+    '[id^="jw-player-"]:not(script):not(style):not(link)',
+    '#connatix-outstream-video',
     '.video-player',
-    '.videoPlayer',
-    '.VideoPlayer',
     '.video-container',
-    '.espn-video-player',
-    '.ClipsPlayerContainer',
-    '.WebPlayerContainer',
-    'disney-web-player',
-    '[data-testid="video-player-espn"]',
-    '.vjs-player',
     '.video-js',
-    '[data-module="video-player"]',
+    '.wp-block-video',
+    '.wp-block-embed.is-type-video',
     '[data-testid="video-player"]'
   ].join(', ');
   const REMOVE_SELECTOR = `video, ${PLAYER_SELECTOR}`;
@@ -45,10 +44,11 @@
       const url = new URL(source, document.baseURI);
       const host = url.hostname;
       const path = url.pathname;
-      return (/(^|\.)espn\.com$/i.test(host) && /^\/(?:[^/]+\/)?video\//i.test(path))
+      return (/(^|\.)(?:jwplayer\.com|jwplatform\.com)$/i.test(host) && /^\/players\//i.test(path))
         || (/(^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(host) && /^\/embed\//i.test(path))
         || (host === 'player.vimeo.com' && /^\/video\//i.test(path))
         || (/(^|\.)dailymotion\.com$/i.test(host) && /^\/embed\/video\//i.test(path))
+        || (host === 'geo.dailymotion.com' && /^\/player\//i.test(path))
         || /\.(?:mp4|webm|m4v|mov|m3u8|mpd)$/i.test(path);
     } catch {
       return false;
@@ -85,7 +85,7 @@
     if (root.isConnected) root.querySelectorAll(CANDIDATE_SELECTOR).forEach(removeCandidate);
   }
 
-  // ESPN adds players after navigation, lazy loading, and scrolling. Inspect only
+  // NY Post adds players after navigation, lazy loading, and scrolling. Inspect only
   // changed subtrees instead of repeatedly scanning the entire page.
   const observer = new MutationObserver(function (records) {
     records.forEach(function (record) {
@@ -103,7 +103,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['src', 'data', 'type', 'class', 'data-module', 'data-testid']
+    attributeFilter: ['src', 'data', 'type', 'class', 'id', 'data-testid']
   });
 
   // Stop playback if a player starts before its removal is processed.
